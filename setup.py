@@ -213,7 +213,8 @@ setup(name='ImageD11',
       ext_modules = [extension,],
       setup_requires = minimal,   # to compile
       install_requires = minimal + useful,
-      extras_require = { 'full' : more, 'rare' : rare },
+      extras_require = { 'full' : more, 'rare' : rare,
+                         'c2' : ['c2ImageD11'] },
       packages = find_packages( include=['ImageD11'
                                         ] ),
       package_dir = {"ImageD11": "ImageD11"},
