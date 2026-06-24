@@ -38,6 +38,47 @@ def parallel_zeros( shape, dtype ):
     return a
 
 
+# --- Shared CPU helpers (backend-independent) ---
+
+
+def cores_available():
+    """
+    Return the number of CPU cores you can use
+    First choice = os.sched_getaffinity
+    Second choice = os.cpu_count (may be high)
+    Third choice = os.environ['NUMBER_OF_PROCESSORS'] (windows+old)
+    Guess at 1 when os.cpu_count someone returns None or 0
+    """
+    if hasattr(os, "sched_getaffinity"):
+        ncpu = len(os.sched_getaffinity(os.getpid()))
+    elif hasattr(os, "cpu_count"):
+        ncpu = os.cpu_count()
+    elif 'NUMBER_OF_PROCESSORS' in os.environ:
+        ncpu = int(os.environ['NUMBER_OF_PROCESSORS'])
+    if ncpu is None or ncpu < 1:
+        return 1
+    else:
+        return ncpu
+
+
+# put_incr dispatch: resolves to put_incr64 or put_incr32 at call time
+# (both functions are provided by whichever backend is loaded below)
+nbyte = struct.calcsize("P")  # 4 or 8
+
+if nbyte == 8:
+
+    def put_incr(*a, **k):
+        """redirects to put_incr64"""
+        return put_incr64(*a, **k)
+
+
+if nbyte == 4:
+
+    def put_incr(*a, **k):
+        """redirects to put_incr32"""
+        return put_incr32(*a, **k)
+
+
 # --- Backend selection ---
 
 if os.environ.get("IMAGED11_USE_C2") == "1":
@@ -127,26 +168,6 @@ else:
         # It is doubtful that this function can ever please everyone.
 
 
-    def cores_available():
-        """
-        Return the number of CPU cores you can use
-        First choice = os.sched_getaffinity
-        Second choice = os.cpu_count (may be high)
-        Third choice = os.environ['NUMBER_OF_PROCESSORS'] (windows+old)
-        Guess at 1 when os.cpu_count someone returns None or 0
-        """
-        if hasattr(os, "sched_getaffinity"):
-            ncpu = len(os.sched_getaffinity(os.getpid()))
-        elif hasattr(os, "cpu_count"):
-            ncpu = os.cpu_count()
-        elif 'NUMBER_OF_PROCESSORS' in os.environ:
-            ncpu = int(os.environ['NUMBER_OF_PROCESSORS'])
-        if ncpu is None or ncpu < 1:
-            return 1
-        else:
-            return ncpu
-
-
     if cimaged11_omp_get_max_threads() == 0:
         # The code was compiled without openmp
         OPENMP = False
@@ -154,23 +175,6 @@ else:
         # Openmp threading can be used
         OPENMP = True
         check_multiprocessing()
-
-
-    # For 32 or 64 bits
-    nbyte = struct.calcsize("P")  # 4 or 8
-
-    if nbyte == 8:
-
-        def put_incr(*a, **k):
-            """redirects to put_incr64"""
-            return put_incr64(*a, **k)
-
-
-    if nbyte == 4:
-
-        def put_incr(*a, **k):
-            """redirects to put_incr32"""
-            return put_incr32(*a, **k)
 
 
     # Add / fix the docstrings
