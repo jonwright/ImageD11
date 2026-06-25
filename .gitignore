@@ -109,3 +109,10 @@ ENV/
 # c2ImageD11 migration testing
 test/c2ImageD11_migration/results_*/
 c2ImageD11_clone/
+
+# f2py build artifacts
+_cImageD11module.c
+_cImageD11-f2pywrappers*
+*.ubi.fftnew
+*.ubi.new
+*.patterson_pks
