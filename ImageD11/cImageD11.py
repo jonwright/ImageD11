@@ -8,6 +8,7 @@ import numba, numpy as np
 
 if os.environ.get("IMAGED11_USE_C2") == "1":
     from c2ImageD11 import *
+    C2_BACKEND = True
 else:
     try:
         from ImageD11._cImageD11 import *
@@ -22,6 +23,13 @@ else:
         print("or:")
         print("   python setup.py build_ext --inplace")
         raise
+    C2_BACKEND = False
+
+try:
+    import c2ImageD11 as _c2
+    C2_VERSION = getattr(_c2, "__version__", None)
+except ImportError:
+    C2_VERSION = None
 
 # Check for the use of openmp interactions with os.fork and multiprocessing
 
