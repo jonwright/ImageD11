@@ -1,0 +1,68 @@
+# Cross-test against c2ImageD11 git head.
+#
+# Builds c2ImageD11 from source (meson+ninja) using the pre-generated
+# wrappers checked into c2ImageD11's repo — no c2py23 dependency.
+# Then runs the full ImageD11 test suite with IMAGED11_USE_C2=1 so we
+# break if an upstream change in c2ImageD11 makes our tests fail.
+#
+# This is the mirror of c2ImageD11's own CI which installs ImageD11 from
+# PyPI. Here we install c2ImageD11 from git head and test our own checkout.
+
+name: c2ImageD11 cross-test
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build-c2-and-test:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: imaged11
+
+      - name: Checkout c2ImageD11 git head
+        uses: actions/checkout@v4
+        with:
+          repository: jonwright/c2ImageD11
+          path: c2ImageD11
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install build deps for c2ImageD11
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja numpy
+
+      - name: Build c2ImageD11 .so with meson (checked-in wrappers, no c2py23)
+        run: |
+          mkdir -p c2ImageD11/build/libc2ImageD11
+          cd c2ImageD11/build/libc2ImageD11
+          meson setup ../../lib
+          ninja
+          arch=$(python -c "import platform; print(platform.machine())")
+          cp _cImageD11.so ../../c2ImageD11/_cImageD11_${arch}.so
+
+      - name: Install c2ImageD11
+        run: |
+          cd c2ImageD11 && python -m pip install .
+
+      - name: Install ImageD11 and test deps
+        run: |
+          python -m pip install numpy pytest numba fabio pyFAI xfab diffpy.Structure scipy orix
+          cd imaged11 && python -m pip install -e .
+
+      - name: Test with IMAGED11_USE_C2=1
+        run: |
+          cd imaged11/test
+          IMAGED11_USE_C2=1 python -m pytest -v --ignore=test_columnfile_pandas.py
