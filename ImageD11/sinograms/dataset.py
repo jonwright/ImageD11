@@ -105,7 +105,8 @@ class DataSet:
         "sparsefile",
         "icolfile",
         "pbpfile",
-        "y0"
+        "y0",
+        "omega_wraps",
     )
     STRINGLISTS = ("scans", "imagefiles", "sparsefiles")
     # sinograms
@@ -134,6 +135,7 @@ class DataSet:
         dtymotor="dty",
         filename=None,
         analysispath=None,
+        omega_wraps=False,
     ):
         """The things we need to know to process data"""
 
@@ -176,6 +178,11 @@ class DataSet:
         self.ybincens = None
         self.obinedges = None
         self.obincens = None
+        # Does the scan turn far enough that omega has to be averaged on the
+        # circle? Default False: a 4D peak is merged linearly. Set it True for
+        # a multi-turn scan (e.g. f2scan), or pass omega_wraps=True here. It is
+        # saved and loaded with the dataset.
+        self.omega_wraps = omega_wraps
 
         self._peaks_table = None
         self._pk2d = None
@@ -504,6 +511,9 @@ class DataSet:
                             rotations += [ scan, ]
                     elif title.split()[0] == "f2scan":
                         # good luck ? Assuming rotation was the inner loop here:
+                        # one continuous rotation split into turns: the merged
+                        # omega must be averaged on the circle.
+                        self.omega_wraps = True
                         step = s["instrument/fscan_parameters/step_size"][()]
                         s1 = int(np.round(360 / step))
                         s0 = self.frames_per_scan[i] // s1
@@ -868,10 +878,14 @@ class DataSet:
             if self.monitor is not None:
                 # we normalise
                 scale_factor = self.monitor_ref/self.monitor
-                self._pk4d = self.peaks_table.pk2dmerge(self.omega_for_bins, self.dty, scale_factor=scale_factor)
+                self._pk4d = self.peaks_table.pk2dmerge(
+                    self.omega_for_bins, self.dty, scale_factor=scale_factor,
+                    omega_wraps=bool(self.omega_wraps))
             else:
                 # don't normalise
-                self._pk4d = self.peaks_table.pk2dmerge(self.omega_for_bins, self.dty)
+                self._pk4d = self.peaks_table.pk2dmerge(
+                    self.omega_for_bins, self.dty,
+                    omega_wraps=bool(self.omega_wraps))
         return self._pk4d
 
     def get_spatial_corrector(self):
