@@ -360,8 +360,18 @@ class columnfile(object):
         #
         if not isinstance( self.__data, list ):
             self.__data = list( self.__data )
-        for i, col in enumerate( self.__data ):   # could be parallel
-            self.__data[i] = col[msk]
+        # keep any columns that share the same underlying buffer (e.g. the
+        # canonical + legacy Friedel pair-id names) pointing at one array
+        seen = {}
+        newdata = []
+        for col in self.__data:
+            key = id(col)
+            if key in seen:
+                newdata.append(seen[key])
+            else:
+                seen[key] = col[msk]
+                newdata.append(seen[key])
+        self.__data = newdata
         self.nrows = len(self.__data[0])
         self.set_attributes()
 
@@ -373,7 +383,17 @@ class columnfile(object):
         self.chkarray()
         cnw.titles = [t for t in self.titles ]
         cnw.parameters = parameters.parameters( **self.parameters.parameters.copy() )
-        cnw.set_bigarray( [col.copy() for col in self.__data] )
+        # share the buffer of aliased (same-id) columns
+        seen = {}
+        newcols = []
+        for col in self.__data:
+            key = id(col)
+            if key in seen:
+                newcols.append(seen[key])
+            else:
+                seen[key] = col.copy()
+                newcols.append(seen[key])
+        cnw.set_bigarray( newcols )
         cnw.ncols = self.ncols
         cnw.set_attributes()
         return cnw
@@ -386,7 +406,17 @@ class columnfile(object):
         cnw = columnfile(self.filename, new = True)
         cnw.titles = [t for t in self.titles ]
         cnw.parameters = parameters.parameters( **self.parameters.parameters.copy() )
-        cnw.bigarray = [col[rows] for col in self.__data]
+        # share the buffer of aliased (same-id) columns
+        seen = {}
+        newcols = []
+        for col in self.__data:
+            key = id(col)
+            if key in seen:
+                newcols.append(seen[key])
+            else:
+                seen[key] = col[rows]
+                newcols.append(seen[key])
+        cnw.bigarray = newcols
         #cnw.ncols, cnw.nrows = cnw.bigarray.shape
         #cnw.set_attributes()
         return cnw
@@ -605,6 +635,10 @@ try:
 
         if getattr(c, 'sortedby', None) is not None:
             g.attrs['sorted_by'] = str(c.sortedby)
+        # alias columns that share the same underlying numpy buffer are written
+        # once and then hard-linked, so the old and new names refer to the same
+        # dataset (e.g. 'vertical_pair_id' <-> 'omega_pair_id').
+        written = {}
         for t in c.titles:
             if t in INTS:
                 ty = np.int64
@@ -619,10 +653,16 @@ try:
                     except TypeError:
                         raise TypeError("Columnfile already exists on disk with a different length, cannot write HDF5!")
                 g[t][:] = dat
+                written[id(getattr(c, t))] = t
             else:
-                g.create_dataset( t, data = dat,
-                                  compression=compression,
-                                  compression_opts=compression_opts )
+                bufsrc = written.get(id(getattr(c, t)))
+                if bufsrc is not None and (g[bufsrc].shape == dat.shape):
+                    g[t] = g[bufsrc]   # hard link to the dataset already written
+                else:
+                    g.create_dataset( t, data = dat,
+                                      compression=compression,
+                                      compression_opts=compression_opts )
+                    written[id(getattr(c, t))] = t
         if opened:
             h.close()
 
@@ -640,12 +680,18 @@ try:
             print(name, h)
             raise
         g.attrs['ImageD11_type'] = 'peaks'
+        written = {}
         for t in cf.titles:
             if t in INTS:
                 ty = np.int64
             else:
                 ty = np.float64
-            g.create_dataset( t, data = getattr(cf, t).astype( ty ) )
+            src = id(getattr(cf, t))
+            if src in written and (g[written[src]].shape == getattr(cf, t).shape):
+                g[t] = g[written[src]]   # hard link
+            else:
+                g.create_dataset( t, data = getattr(cf, t).astype( ty ) )
+                written[src] = t
         h.close()
 
     def colfile_from_hdf( hdffile , name=None, obj=None ):
@@ -699,8 +745,17 @@ try:
             col = obj
         col.sortedby = g.attrs.get('sorted_by', None)
         col.nrows = len( g[newtitles[0]] )
+        # hard-linked datasets (e.g. the canonical + legacy Friedel pair-id
+        # columns) read once and share the same numpy array under both names.
+        written = {}
         for name in newtitles:
-            col.addcolumn( g[name][:].copy(), name )
+            did = g[name].id
+            if did in written:
+                col.addcolumn(written[did], name)
+            else:
+                arr = g[name][:].copy()
+                written[did] = arr
+                col.addcolumn(arr, name)
         h.close()
         return col
 

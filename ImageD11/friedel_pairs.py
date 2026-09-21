@@ -3,14 +3,32 @@
 #
 #    Friedel relationships
 #    ----------------------
-#    omega pairs : (h,k,l), -(h,k,l) reflexion 180° apart in ω:              g -> -g, eta -> 180 - eta
-#    eta pairs   : "entry" and "exit" (h,k,l),-(h,k,l) reflexions at ω ± θ:  g -> -g, eta -> 180 + eta
+#    A single scattering vector (g, -g) is seen up to 4 times on the detector,
+#    once in each of the 4 detector quadrants (y/z signs: ++, +-, -+, --).
+#    With the beam along x, rotation axis up z and y normal to beam and axis:
+#
+#         z (up)
+#      (y-,z+)   |   (y+,z+)          horizontal pair : (y+,z+) <-> (y-,z+)
+#                |                              (y+,z-) <-> (y-,z-)   [g->g,  y->-y, eta -> -eta]
+#        --------+-------- y           vertical   pair : (y+,z+) <-> (y+,z-)
+#                |                              (y-,z+) <-> (y-,z-)   [g->-g, y-> y, eta -> 180-eta]
+#      (y-,z-)   |   (y+,z-)          diagonal   pair : (y+,z+) <-> (y-,z-)
+#                                                             (y+,z-) <-> (y-,z+)   [g->-g, y->-y, eta -> 180+eta]
+#
+#    The three pairwise relationships (one partner per relationship, from the 4
+#    quadrant peaks):
+#       horizontal_pair : entry / exit of the Ewald sphere at +-y (same g). NOT yet in legacy code.
+#       vertical_pair   : omega pair, peaks ~180 deg apart in omega (omega -> omega+180). Legacy name 'omega_pair'.
+#       diagonal_pair   : the point-inversion Friedel pair g -> -g. Legacy name 'eta_pair'.
+#
+#    NOTE: When the wedge/tilt_x are non-zero the angle criteria are not exactly these,
+#          and vertical(omega) peaks are separated by ~2*theta in omega.
 #
 # Works both for box-beam and scanning-3DXRD
-# Two modes of pairing: 
+# Three relationships (PairMode) with mode-based pairing:
 #       global    -> split columnfile in half and match the two mirror subsets
-#       by chunks -> split columnfile in chunks along dty (scans) or omega+dty (frames) and match mirror chunks
-#                    (for scanning-3DXRD data only)
+#       by chunks -> split columnfile in chunks along dty (scans), omega+dty (frames)
+#                    or eta bins and match mirror chunks (for scanning-3DXRD data only)
 #
 # Friedel pair matching handled by FriedelPairIndexer obj. 
 # For the chunk method, columnfile splitting handled by PeakSubsets obj. 
@@ -25,6 +43,7 @@ import numpy as np
 import multiprocessing as mp
 from collections import namedtuple
 from contextlib import contextmanager
+from enum import Enum
 from tqdm import tqdm
 
 import scipy.spatial
@@ -36,6 +55,118 @@ from ImageD11 import columnfile, transform
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
+
+
+# ──────────────────────────────────────────────────────────────────────────────────────────
+# PairMode: the three Friedel pair relationships
+# ──────────────────────────────────────────────────────────────────────────────────────────
+class PairMode(str, Enum):
+    """
+    The three pairwise relationships between the peaks of a scattering vector (g, -g)
+    appearing in the 4 detector quadrants. See module header for the quadrant diagram.
+
+    Each member encodes the (g, y) transformation of the partner peak:
+        HORIZONTAL  : g ->  g, y -> -y, eta -> -eta      (Ewald sphere entry/exit at +-y)
+        VERTICAL    : g -> -g, y ->  y, eta -> 180-eta   (omega pair, omega -> omega+180)
+        DIAGONAL    : g -> -g, y -> -y, eta -> 180+eta   (Friedel point inversion)
+    """
+    HORIZONTAL = 'horizontal_pair'
+    VERTICAL   = 'vertical_pair'
+    DIAGONAL   = 'diagonal_pair'
+
+    def __str__(self):
+        return self.value
+
+
+# legacy (paired-type) names mapped to the canonical mode strings
+_MODE_ALIASES = {
+    'omega':        PairMode.VERTICAL.value,
+    'omega_pair':   PairMode.VERTICAL.value,
+    'vertical':     PairMode.VERTICAL.value,
+    'vertical_pair': PairMode.VERTICAL.value,
+    'eta':          PairMode.DIAGONAL.value,
+    'eta_pair':     PairMode.DIAGONAL.value,
+    'diagonal':     PairMode.DIAGONAL.value,
+    'diagonal_pair': PairMode.DIAGONAL.value,
+    'horizontal':   PairMode.HORIZONTAL.value,
+    'horizontal_pair': PairMode.HORIZONTAL.value,
+    'entry_exit':   PairMode.HORIZONTAL.value,
+}
+
+# legacy column names produced by the old code (pf3dxrd and the old notebooks read these).
+# horizontal_pair is new and has no legacy name.
+_LEGACY_COLUMNS = {
+    PairMode.VERTICAL.value:   'omega_pair_id',
+    PairMode.DIAGONAL.value:   'eta_pair_id',
+    PairMode.HORIZONTAL.value: None,
+}
+
+# which columnfile column each mode is sorted by / split along
+_SORT_COL = {
+    PairMode.VERTICAL.value:   'omega',
+    PairMode.DIAGONAL.value:   'eta',
+    PairMode.HORIZONTAL.value: 'eta',
+}
+
+
+def _resolve_mode(mode):
+    """
+    Return the canonical PairMode string ('horizontal_pair'|'vertical_pair'|'diagonal_pair')
+    for a user-supplied mode.
+
+    Accepts PairMode members, canonical strings, and the legacy names 'omega' / 'eta'
+    (and 'omega_pair' / 'eta_pair') so old callers keep working.
+    """
+    if isinstance(mode, PairMode):
+        return mode.value
+    if not isinstance(mode, str):
+        raise TypeError('pair_type/mode must be a str or PairMode, got %r' % (mode,))
+    try:
+        return _MODE_ALIASES[mode]
+    except KeyError:
+        raise ValueError(
+            'Unknown pair mode %r. Use one of %s (legacy names "omega"/"eta" still accepted).'
+            % (mode, sorted(set(_MODE_ALIASES.values()))))
+
+
+def _pair_column(mode):
+    """canonical pair-id column name for a mode, e.g. 'vertical_pair_id'."""
+    return '%s_id' % _resolve_mode(mode)
+
+
+def _legacy_column(mode):
+    """legacy ('omega_pair_id'/'eta_pair_id') column name for a mode, or None."""
+    return _LEGACY_COLUMNS.get(_resolve_mode(mode))
+
+
+def _sort_column(mode):
+    return _SORT_COL[_resolve_mode(mode)]
+
+
+# which PeakSubsets subdivision each chunk_type uses
+_CHUNK_MODES = {
+    'scans':           PairMode.VERTICAL.value,
+    'frames':          PairMode.VERTICAL.value,
+    'eta_bins':        PairMode.DIAGONAL.value,
+    'horizontal_bins': PairMode.HORIZONTAL.value,
+    'minus_eta_bins':  PairMode.HORIZONTAL.value,
+}
+
+
+def _resolve_chunk(chunk_type):
+    """Return (mode, subset_type) for a chunk_type used by match_friedel_pairs_by_chunks."""
+    try:
+        mode = _CHUNK_MODES[chunk_type]
+    except KeyError:
+        raise ValueError(
+            'Unknown chunk_type %r. Use one of %s.' % (chunk_type, sorted(_CHUNK_MODES)))
+    if chunk_type == 'scans':
+        subset = 'scans'
+    elif chunk_type == 'frames':
+        subset = 'frames'
+    else:
+        subset = 'eta_bins'   # 'eta_bins', 'horizontal_bins', 'minus_eta_bins'
+    return mode, subset
 
 
 
@@ -82,7 +213,7 @@ class PeakSubsets:
     Columnfile is sorted, either in sinogram order (dty, omega) for omega-pairs or in eta order for eta-pairs 
     and subset indices are stored in lookup tables (LUT) for fast selection. 
     """
-    def __init__(self, cf, ds, n_eta_bins=360, y0=None):
+    def __init__(self, cf, ds, n_eta_bins=360, y0=None, pairing='diagonal'):
         self.columnfile = cf
         self.dataset = ds
         self.is_half_acquisition = cf.omega.max() - cf.omega.min() < 181
@@ -95,6 +226,7 @@ class PeakSubsets:
         self.valid_scans_subsets = None
         self.valid_frames_subsets = None
         self.valid_eta_bins_subsets = None
+        self.eta_pairing = pairing   # 'diagonal' (eta -> +180) or 'horizontal' (eta -> -eta)
         
         self._get_y0(y0)
         self._set_aliases()
@@ -113,7 +245,12 @@ class PeakSubsets:
         if not self.is_half_acquisition:
             self.get_scan_subsets()
             self.get_frames_subsets()
-        self.get_eta_bins_subsets(n_eta_bins)
+        self.get_eta_bins_subsets(n_eta_bins, self.eta_pairing)
+
+    def set_eta_pairing(self, pairing):
+        """ choose the eta-bin pairing: 'diagonal' (eta -> +180) or 'horizontal' (eta -> -eta) """
+        assert pairing in ('diagonal', 'horizontal'), pairing
+        self.eta_pairing = pairing
 
     def _reset_LUTs(self):
         for attr in list(self.__dict__.keys()):
@@ -234,29 +371,39 @@ class PeakSubsets:
         self.ebinedges = np.linspace(emin, emax, n_bins+1)
         self.ebincens  = np.linspace(emin + eta_step / 2, emax - eta_step / 2, len(self.ebinedges) - 1)
     
-    def get_eta_bins_subsets(self, n_bins):
+    def get_eta_bins_subsets(self, n_bins, pairing='diagonal'):
         """
-        Find mirror pairs of eta bins:
-            bin lo :  eta_lo
+        Find mirror pairs of eta bins.
+
+        pairing='diagonal' (default, eta pair) finds rows of the matrix
             bin hi :  eta_lo + 180
+        pairing='horizontal' finds the bins at opposite +/-y
+            bin hi :  -eta_lo
 
         Sets ds.eta_bins_subsets: list of Pair namedtuples ('Pair', ['ei_hi', 'ei_lo', 'eta_hi', 'eta_lo'])
         where ei_* are indices into self.ebincens.
         """
+        assert pairing in ('diagonal', 'horizontal'), pairing
         self._get_eta_bins(n_bins)
         ec = self.ebincens
         eb = self.ebinedges
         n_eta = len(ec)
         eta_half = n_eta // 2          # index shift for a 180-deg omega step
         pairs = []
-        for ei_lo in range(0, eta_half):
-            ei_hi = (ei_lo + eta_half ) % n_eta
-            pairs.append(_make_eta_pair(ei_hi, ei_lo, ec))
+        if pairing == 'diagonal':
+            for ei_lo in range(0, eta_half):
+                ei_hi = (ei_lo + eta_half ) % n_eta
+                pairs.append(_make_eta_pair(ei_hi, ei_lo, ec))
+        else:  # horizontal: +-y mirror -> eta -> -eta
+            for ei_lo in range(0, n_eta):
+                ei_hi = n_eta - 1 - ei_lo
+                if ei_hi > ei_lo:      # keep each pair once
+                    pairs.append(_make_eta_pair(ei_hi, ei_lo, ec))
         self.eta_bins_subsets = pairs
 
         logger.info(
-            "[get_eta_bins_subsets] %d pairs of eta bins ",
-            len(pairs))
+            "[get_eta_bins_subsets] %d pairs of eta bins (%s)",
+            len(pairs), pairing)
     
 
     def sort_by_sinogram(self):
@@ -696,12 +843,13 @@ class FriedelPairIndexer:
                 n_steps=self.n_steps,
                 n_out=len(self.outputs)))
 
-    def set_peak_subsets(self, n_eta_bins=360, y0=None):
+    def set_peak_subsets(self, n_eta_bins=360, y0=None, pairing='diagonal'):
         self.logger.info('--- SET PEAKSUBSETS ---')
-        self.PeakSubsets = PeakSubsets(self.cf, self.ds, n_eta_bins, y0)
+        self.PeakSubsets = PeakSubsets(self.cf, self.ds, n_eta_bins, y0, pairing)
 
     def sort_peak_subsets(self, pair_type='omega'):
-        if pair_type == 'omega':
+        mode = _resolve_mode(pair_type)
+        if mode == PairMode.VERTICAL.value:
             if self.PeakSubsets.is_half_acquisition:
                 raise ValueError("Half acquisition. Cannot find omega pairs.")
             self.PeakSubsets.sort_by_sinogram()
@@ -732,13 +880,14 @@ class FriedelPairIndexer:
         an iterative nearerst-neighbor search is performed to find the pairs
         within a certain distance defined by the tolerance thresholds. 
 
-        Works both for omega-pairs and eta-pairs.
+        Works both for vertical_pair (omega) and diagonal_pair / horizontal_pair (eta).
         WARNING: do not use on large (>10M peaks) sanning-3DXRD peakfiles: very slow!
-                 Use the chunk approach instead (self.match_omega_pairs_by_chunks)
+                 Use the chunk approach instead (self.match_friedel_pairs_by_chunks)
         
         Parameters
         ----------
-        pair_type     : str; 'omega' or 'eta'
+        pair_type     : PairMode | str; 'omega'/'vertical_pair', 'eta'/'diagonal_pair'
+                        or 'horizontal_pair'
         drop_unpaired : bool; If True non-paired peaks are filtered out from self.cf 
         timeout       : float; max execution time (s) before timeout for _run_pairing.
         filter_mode   : str; 'strict' or 'relaxed'
@@ -747,27 +896,29 @@ class FriedelPairIndexer:
                         see also: self.run_pairing
         Returns
         -------
-        adds new colum '<pair_type>_pair_id' to self.cf
+        adds new colum '<mode>_pair_id' to self.cf (plus the legacy column name via a link)
         Returns self.cf with the new pair_id column
         -------
         """
-        self.logger.info('--- MATCH FRIEDEL PAIRS [%s pairs] ---', pair_type)
+        mode = _resolve_mode(pair_type)
+        self.logger.info('--- MATCH FRIEDEL PAIRS [%s] ---', mode)
         
         # -- 1. Initialization: sort and split
         self.reset_outputs()
-        self.cf.sortby(pair_type)
+        self.cf.sortby(_sort_column(mode))
         
-        if pair_type == 'eta':
-            idx1 = np.nonzero(self.cf.eta < 0)[0]
-            idx2 = np.nonzero(self.cf.eta > 0)[0]
-        else:
+        if mode == PairMode.VERTICAL.value:
             if self.cf.omega.max() - self.cf.omega.min() > 181:
                 idx1 = np.nonzero(self.cf.omega%360 > 180)[0]
                 idx2 = np.nonzero(self.cf.omega%360 < 180)[0]
             else:
                 raise ValueError("Half acquisition. Cannot find omega pairs.")
+        else:
+            # diagonal and horizontal both live on opposite +-eta sides of the beam
+            idx1 = np.nonzero(self.cf.eta < 0)[0]
+            idx2 = np.nonzero(self.cf.eta > 0)[0]
 
-        self.cf.addcolumn(np.full(self.cf.nrows, -1, dtype=int), pair_type+'_pair_id')
+        self.cf.addcolumn(np.full(self.cf.nrows, -1, dtype=int), _pair_column(mode))
         
         # -- 2. Search-space calibration -----------------------------
         self.logger.info('--- SEARCH SPACE CALIBRATION [pilot pairing] ---')
@@ -826,15 +977,15 @@ class FriedelPairIndexer:
         independently within mirror subsets (mirror dty scans or omega-dty frames),
         then merged into the master columnfile.
         
-        Works only for scanning-3DXRD datasets with a dty column. Only search for
-        omega-pairs. eta-pair search not implemented yet. 
+        Works only for scanning-3DXRD datasets with a dty column.
 
         Parameters
         ----------
-        chunk_type    : str 'frames', 'scans', 'eta_bins' ( default: 'scans')
-                        For omega pairs, use 'frames' or 'scans' for friedel pair search at 
+        chunk_type    : str 'frames', 'scans', 'eta_bins', 'horizontal_bins' ( default: 'scans')
+                        For vertical (omega) pairs, use 'frames' or 'scans' for friedel pair search at 
                         different levels of chunking granularity.
-                        For eta pairs, use 'eta_bins' 
+                        For diagonal (eta) pairs, use 'eta_bins'.
+                        For horizontal pairs, use 'horizontal_bins'.
         n_eta_bins    : int, even nb. number of bins for eta chunks.  
         drop_unpaired : bool (default False)
         reset_psub    : bool (default False). reset self.Peaksubset if True. 
@@ -850,12 +1001,12 @@ class FriedelPairIndexer:
         """
         global _shared_cf
 
-        pair_type = 'eta' if chunk_type == 'eta_bins' else 'omega'
-        self.logger.info('--- MATCH FRIEDEL PAIRS [%s pairs] ---', pair_type)
+        mode, subset_type = _resolve_chunk(chunk_type)
+        self.logger.info('--- MATCH FRIEDEL PAIRS [%s] ---', mode)
 
         # ── 1. Checks + init ───────────────────────────────────────────────────
         self.logger.info('--- INITIALIZATION ---')
-        self.reset_outputs(pair_type+'_pair_id')
+        self.reset_outputs(_pair_column(mode))
 
         pairs_list, valid_pairs, LUT = self.initialize_peaksubsets(chunk_type, n_eta_bins, reset_psub)
         Psub  = self.PeakSubsets
@@ -869,18 +1020,16 @@ class FriedelPairIndexer:
         # ── 2. Search-space calibration ──────────────────────────────────────
         self.logger.info('--- SEARCH SPACE CALIBRATION [pilot pairing] ---')
 
-       # pilot_chunk = 'eta_bins' if chunk_type == 'eta_bins' else 'scans'
-        
         # pick a pair near the middle 
         s0 = 0
         while not valid_pairs[s0]:
             s0 += 1
-        idx1_pilot, idx2_pilot = Psub.select_pair(s0, chunk_type, return_as='idx')
+        idx1_pilot, idx2_pilot = Psub.select_pair(s0, subset_type, return_as='idx')
 
         # find weight factors for optimal rescaling
         try:
             _, rescaling_wts = self.estimate_search_scales(
-                idx1_pilot, idx2_pilot, 0.5 * dist_max, pair_type=pair_type)
+                idx1_pilot, idx2_pilot, 0.5 * dist_max, pair_type=mode)
         except RuntimeError:
             rescaling_wts = {'gx': 1., 'gy': 1., 'gz': 1., 'eta': 1., 'I': 1.}
             
@@ -923,17 +1072,17 @@ class FriedelPairIndexer:
                 if (pid >= len(pairs_list)-1):
                     continue
 
-            if extended_bin_search and chunk_type!='frames':
+            if extended_bin_search and subset_type!='frames':
                 try:
-                    idx1, idx2 = self.PeakSubsets._extended_pair_selec(pid, chunk_type)
+                    idx1, idx2 = self.PeakSubsets._extended_pair_selec(pid, subset_type)
                 except KeyError as e: # with extended selection one bounding pair may end up being non-valid pair. in this case, use regular selection instead
-                    idx1, idx2 = self.PeakSubsets.select_pair(pid, chunk_type, return_as='idx')
+                    idx1, idx2 = self.PeakSubsets.select_pair(pid, subset_type, return_as='idx')
             else:
-                idx1, idx2 = self.PeakSubsets.select_pair(pid, chunk_type, return_as='idx')
+                idx1, idx2 = self.PeakSubsets.select_pair(pid, subset_type, return_as='idx')
 
             worker_args.append((
                 pid, idx1, idx2,
-                pair_type,
+                mode,
                 filter_mode,
                 weights_eff,
                 self.tol_gv, self.tol_eta, self.tol_logI,
@@ -971,14 +1120,14 @@ class FriedelPairIndexer:
         # ── 4. Merge ─────────────────────────────────────────────────────────
         self.logger.info('--- MERGING OUTPUTS ---')
         deduplicate = extended_bin_search == True
-        # unique pair identifier in omega_pair_id. -1 for unpaired peaks
-        self.merge_outputs(pair_type=pair_type,
+        # unique pair identifier in the mode pair column. -1 for unpaired peaks
+        self.merge_outputs(pair_type=mode,
                            drop_broken=True,
                            drop_unpaired=drop_unpaired,
                            deduplicate = deduplicate)
 
         if doplot:
-            _ = plot_pair_distances(self.cf, pair_type = pair_type, bins=50, log_scale=False)
+            _ = plot_pair_distances(self.cf, pair_type = mode, bins=50, log_scale=False)
         return self.cf
 
 
@@ -1011,14 +1160,22 @@ class FriedelPairIndexer:
         cf = self.cf
 
         # ── 0. Sanity checks ──────────────────────────────────────────────────
-        for col in ('omega_pair_id', 'eta_pair_id'):
+        # the vertical (omega) and diagonal (eta) pair-id columns, using the
+        # canonical names but falling back to the legacy column names.
+        for want in ('vertical_pair', 'diagonal_pair'):
+            col = _pair_column(want)
+            if col not in cf.titles:
+                legacy = _legacy_column(want)
+                if legacy is not None and legacy in cf.titles:
+                    col = legacy
             if col not in cf.titles:
                 raise RuntimeError(
                     "'{}' column not found. "
                     "Run match_{}_pairs() first.".format(col, col.split('_')[0]))
-
-        om_col  = cf.getcolumn('omega_pair_id')   # (nrows,)
-        eta_col = cf.getcolumn('eta_pair_id')     # (nrows,)
+            if want == 'vertical_pair':
+                om_col = cf.getcolumn(col)        # (nrows,)
+            else:
+                eta_col = cf.getcolumn(col)       # (nrows,)
 
         # ── 1. Select peaks that belong to both an omega- and an eta-pair ─────
         self.logger.info('--- QUADRUPLET SEARCH ---')
@@ -1173,24 +1330,26 @@ class FriedelPairIndexer:
         """ Initialization and checks for match_friedel_pairs_by_chunks(): """
 
         # identify chunking scheme and pair_type
-        assert chunk_type in ['frames','scans', 'eta_bins'], "chunk_type must be 'frames', 'scans' or 'eta_bins' " 
-        self.logger.info('Chunk type for pairing: %s', chunk_type)
-        pair_type = 'eta' if chunk_type=='eta_bins' else 'omega'
+        mode, subset_type = _resolve_chunk(chunk_type)
+        self.logger.info('Chunk type for pairing: %s  (mode=%s)', chunk_type, mode)
+        pairing = 'horizontal' if mode == PairMode.HORIZONTAL.value else 'diagonal'
 
         # initialize peaksubset and sort accordingly with pair_type
         if self.PeakSubsets is None or reset:
             logger.info('reset Peaksubsets with %d eta bins', n_eta_bins)
             self.PeakSubsets = None
-            self.set_peak_subsets(n_eta_bins)
-            
-        self.sort_peak_subsets(pair_type)
+            self.set_peak_subsets(n_eta_bins, pairing=pairing)
+        else:
+            self.PeakSubsets.set_eta_pairing(pairing)
+
+        self.sort_peak_subsets(mode)
         Psub = self.PeakSubsets
         
-        LUT         = getattr(Psub, chunk_type+'_LUT', None)
-        pairs_list  = getattr(Psub, chunk_type+'_subsets', None)
-        valid_pairs = getattr(Psub, 'valid_'+chunk_type+'_subsets', None)
+        LUT         = getattr(Psub, subset_type+'_LUT', None)
+        pairs_list  = getattr(Psub, subset_type+'_subsets', None)
+        valid_pairs = getattr(Psub, 'valid_'+subset_type+'_subsets', None)
 
-        if (pair_type) == 'omega' and Psub.is_half_acquisition:
+        if mode == PairMode.VERTICAL.value and Psub.is_half_acquisition:
             raise ValueError(
                     "Half acquisition. Cannot find omega pairs.")
         if LUT is None:
@@ -1312,19 +1471,21 @@ class FriedelPairIndexer:
         Parameters
         ----------
         cf_target     : columnfile to write into (defaults to self.cf)
-        pair_type     : 'omega' or 'eta'
+        pair_type     : PairMode | str — 'horizontal_pair' | 'vertical_pair' | 'diagonal_pair'
+                        or legacy names 'omega' / 'eta'
         drop_broken   : bool — if True, remove singleton pair_ids from cf
         drop_unpaired : bool — if True, remove non-paired peaks from cf
         """
         if cf_target is None:
             cf_target = self.cf
 
+        mode   = _resolve_mode(pair_type)
         # add pair_id column (or reset it if already there)
-        label_col_name = '{}_pair_id'.format(pair_type)
+        label_col_name = _pair_column(mode)
         cf_target.addcolumn(np.full(cf_target.nrows, -1, dtype=int), label_col_name)
         label_col = cf_target.getcolumn(label_col_name)
 
-        self.logger.info('--- MERGING OUTPUTS  [%s-pair] ---', pair_type)
+        self.logger.info('--- MERGING OUTPUTS  [%s-pair] ---', mode)
         self.logger.info('  %d chunk(s) to merge  (%d peaks total)',
             len(self.outputs), cf_target.nrows)
 
@@ -1430,6 +1591,17 @@ class FriedelPairIndexer:
                 (~paired_mask).sum())
             cf_target.filter(paired_mask)
             self.logger.info('Done')
+
+        # ── legacy column alias ────────────────────────────────────────────
+        # Write the old column name (omega_pair_id / eta_pair_id) as a reference
+        # to the same array so pf3dxrd and old notebooks keep working. On HDF5
+        # save colfile_to_hdf turns columns sharing the same buffer into a link.
+        legacy = _legacy_column(mode)
+        if legacy is not None and legacy != label_col_name:
+            if legacy not in cf_target.titles:
+                cf_target.addcolumn(cf_target.getcolumn(label_col_name), legacy)
+            else:
+                cf_target.setcolumn(cf_target.getcolumn(label_col_name), legacy)
             
 
 # ─────────────────────────────────────────────
@@ -1450,8 +1622,10 @@ def _search_space(cf, idx, weights=None, flip=None):
               user-defined scaling factors for search dimensions
               > 1 increase importance, < 1 decrease it, ~0 mutes it
 
-    flip    : None | 'omega' | 'eta'.
-              Flip partner space for omega or eta-pairs search
+    flip    : None | PairMode | str.
+              Flip partner space for the requested Friedel relationship. Accepts the
+              canonical names 'horizontal_pair' / 'vertical_pair' / 'diagonal_pair'
+              or the legacy names 'omega' / 'eta'.
     Returns
     -------
     space   : (N, 5) search space rescaled according to input weights
@@ -1467,12 +1641,21 @@ def _search_space(cf, idx, weights=None, flip=None):
     eta = cf.eta[idx]
     logI = np.log10(np.maximum(cf.sum_intensity[idx], 1e-10))
 
-    if flip == 'omega':
-        gx, gy, gz = -gx, -gy, -gz
-        eta = _wrap_eta(180.0 - eta)
-    elif flip == 'eta':
-        gx, gy, gz = -gx, -gy, -gz
-        eta = _wrap_eta(180.0 + eta)
+    if flip in (None, False):
+        pass
+    else:
+        flip = _resolve_mode(flip)
+        if flip == PairMode.VERTICAL.value:
+            gx, gy, gz = -gx, -gy, -gz
+            eta = _wrap_eta(180.0 - eta)
+        elif flip == PairMode.DIAGONAL.value:
+            gx, gy, gz = -gx, -gy, -gz
+            eta = _wrap_eta(180.0 + eta)
+        elif flip == PairMode.HORIZONTAL.value:
+            # same g-vector; the mate is on the opposite side of the beam in +-y
+            eta = _wrap_eta(-eta)
+        else:  # pragma: no cover - _resolve_mode already validated
+            raise ValueError('unexpected flip mode %r' % (flip,))
 
     space = np.column_stack([
         gx   * _w['gx'],
@@ -1565,23 +1748,35 @@ def _physical_pair_distance(cf, idx1, idx2, pair_type='omega'):
     Parameters
     ----------
     idx1 / idx2 : indices of paired subsets in cf
-    pair_type   : 'eta' or 'omega'
+    pair_type   : PairMode | str — 'horizontal_pair' | 'vertical_pair' | 'diagonal_pair',
+                 or legacy names 'omega' / 'eta'
 
     Returns
     -------
     d_gvec, d_eta, d_logI
     """
-    # g-vector distance :(hkl),-(hkl) pairs: g + -g ~ 0 
-    dgx = cf.gx[idx1] + cf.gx[idx2]
-    dgy = cf.gy[idx1] + cf.gy[idx2]
-    dgz = cf.gz[idx1] + cf.gz[idx2]
+    pair_type = _resolve_mode(pair_type)
+    # g-vector distance.
+    #   vertical / diagonal: (hkl),-(hkl) pairs -> g + -g ~ 0
+    #   horizontal: same g-vector, so the mates have equal g -> g - g ~ 0
+    if pair_type == PairMode.HORIZONTAL.value:
+        dgx = cf.gx[idx1] - cf.gx[idx2]
+        dgy = cf.gy[idx1] - cf.gy[idx2]
+        dgz = cf.gz[idx1] - cf.gz[idx2]
+    else:
+        dgx = cf.gx[idx1] + cf.gx[idx2]
+        dgy = cf.gy[idx1] + cf.gy[idx2]
+        dgz = cf.gz[idx1] + cf.gz[idx2]
     d_gvec = np.sqrt(dgx**2 + dgy**2 + dgz**2)
     # eta distance
-    if pair_type == 'omega':
-        diff = cf.eta[idx1] - (180-cf.eta[idx2])   # absolute difference without modulo 
+    if pair_type == PairMode.VERTICAL.value:
+        diff = cf.eta[idx1] - (180-cf.eta[idx2])   # absolute difference without modulo
         d_eta = np.abs( _wrap_eta(diff) )          # wrap to [-180,180)
-    else:
+    elif pair_type == PairMode.DIAGONAL.value:
         diff = cf.eta[idx1] - (180+cf.eta[idx2])
+        d_eta = np.abs( _wrap_eta(diff) )
+    else:  # horizontal
+        diff = cf.eta[idx1] - (-cf.eta[idx2])
         d_eta = np.abs( _wrap_eta(diff) )
     # logI distance (intensity mismatch)
     logI_1 = np.log10(cf.sum_intensity[idx1])
@@ -1863,7 +2058,12 @@ def _worker_initializer():
 # ─────────────────────────────────────────────
 def get_pairs(cf, pair_type='omega'):
     """ returns (idx1, idx2) : index positions of pairs in cf """
-    pair_id_name = pair_type + '_pair_id'
+    pair_id_name = _pair_column(pair_type)
+    if pair_id_name not in cf.titles:
+        # fall back to the legacy column name
+        legacy = _legacy_column(pair_type)
+        if legacy is not None and legacy in cf.titles:
+            pair_id_name = legacy
     pair_id_col = cf.getcolumn(pair_id_name)        
     paired = np.flatnonzero(pair_id_col > -1)
     if cf.sortedby == pair_id_name:
@@ -1935,6 +2135,68 @@ def plot_pair_distances(cf, pair_type='omega', bins=50, log_scale=False, **kwarg
     return fig, axes
 
 
+def locate_pairs_affine(cf, pairs):
+    """
+    Affine form of the pair relocation problem (scanning-3DXRD only).
+
+    The geometry of a grain in the beam gives, per peak of a pair:
+        dty - y0 = -sx sin(w) - sy cos(w)
+    Writing both members of a pair together:
+        R . s = d - y0 * 1
+        s = [sx,sy], R = [[-sin w1, -cos w1],[-sin w2, -cos w2]],
+        d = [dty1, dty2], 1 = [1, 1]
+    Since y0 does not depend on R, the solve can be done once giving the affine
+    relation:
+        s(y0) = s0 - y0 * v,   s0 = R^-1 . d,  v = R^-1 . 1
+    This lets the position be evaluated for any y0 at almost no cost.
+
+    Parameters
+    ----------
+    cf    : ImageD11 columnfile
+    pairs : (idx1, idx2) arrays of cf indices for each pair
+
+    Returns
+    -------
+    s0, v : arrays of shape (2, N) == (sx-row, sy-row) over all pairs.
+    """
+    i1, i2 = pairs
+    r  = np.radians(cf.omega)
+    so, co = np.sin(r), np.cos(r)
+    # Per-pair 2x2 matrix R, stacked over N pairs -> (N,2,2)
+    R = np.transpose(((-so[i1], -co[i1]),
+                      (-so[i2], -co[i2])), axes=(2, 0, 1))
+    # Data vector d = [dty_i1; dty_i2] per pair (the RHS when y0 = 0)
+    d = np.transpose((cf.dty[i1], cf.dty[i2]))
+    # Right-hand-side matrix [d | 1]
+    rhs  = np.stack([d, np.ones_like(d)], axis=-1)
+    sol  = np.linalg.solve(R, rhs)                  # (N,2,2): [s0 | v]
+    s0 = sol[..., 0].T   # (2,N) == R^-1 . d
+    v  = sol[..., 1].T   # (2,N) == R^-1 . 1
+    return s0, v
+
+
+def locate_pairs(cf, pairs, y0=0.):
+    """
+    Fit the centre of mass position of the pairs (scanning-3DXRD only).
+
+    Uses the affine relation s(y0) = s0 - y0*v (see locate_pairs_affine), so the
+    linear solve is done once and evaluating at a given y0 is a multiply/subtract.
+
+    Parameters
+    ----------
+    cf    : ImageD11 columnfile
+    pairs : (idx1, idx2) arrays of cf indices for each pair
+    y0    : float, beam-centre offset
+
+    Returns
+    -------
+    sx, sy : sample x and y co-ordinates of each peak-pair (shape (N,))
+    """
+    s0, v = locate_pairs_affine(cf, pairs)
+    sx, sy = s0 - y0 * v
+    return sx, sy
+
+
 def locate_eta_pairs(cf, pairs, ds=None, y0=0.):
     """
     Fit the centre of mass position of eta-pairs and write results
@@ -1949,17 +2211,7 @@ def locate_eta_pairs(cf, pairs, ds=None, y0=0.):
     y0    : float, beam centre offset
     """
     i1, i2 = pairs
-    r  = np.radians(cf.omega)
-    so = np.sin(r)
-    co = np.cos(r)
-
-    y = np.transpose((cf.dty[i1] - y0,
-                      cf.dty[i2] - y0))
-
-    R = np.transpose(((-so[i1], -co[i1]),
-                      (-so[i2], -co[i2])), axes=(2, 0, 1))
-
-    sx_pairs, sy_pairs = np.linalg.solve(R, y).T
+    sx_pairs, sy_pairs = locate_pairs(cf, (i1, i2), y0)
 
     # ── write into cf. Overwrite pre-existing sx, sy
     sx = np.full(cf.nrows, np.nan)
@@ -2121,3 +2373,266 @@ def update_geometry_fpairs(cf, ds=None, add_xyz_lab=False, relocate_pairs=True):
 
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Lightweight ring-level helpers (used by the S3DXRD / TDXRD notebooks)
+# ─────────────────────────────────────────────────────────────────────────────
+def find_pairs(cf, gvtol=0.002, mode='diagonal_pair', doplot=False):
+    """
+    Locate Friedel pairs on a powder ring using only the g-vectors (no intensity).
+
+    Splits the peaks by the relevant sign (eta for diagonal/horizontal, omega for
+    vertical) and matches the g-vector of one side against +/- the other side with
+    a 3D KDTree. This is the lightweight equivalent of the notebook helpers and is
+    suitable for peaks already filtered to a single ring.
+
+    Parameters
+    ----------
+    cf      : ImageD11 columnfile with columns gx, gy, gz (and eta / omega for the split)
+    gvtol   : g-vector distance tolerance (Angstrom^-1)
+    mode    : PairMode | str; the relationship. 'diagonal_pair' (default) matches
+              g with -g on the eta>0 / eta<0 sides.
+    doplot  : plot the histogram of g-vector distances
+
+    Returns
+    -------
+    ip, im : index arrays of the two sides of the pairs.
+    """
+    mode = _resolve_mode(mode)
+    g = np.transpose((cf.gx, cf.gy, cf.gz))
+    if mode == PairMode.VERTICAL.value:
+        ip = np.flatnonzero(cf.omega % 360 > 180)
+        im = np.flatnonzero(cf.omega % 360 < 180)
+        sign = -1.0
+    else:
+        ip = np.flatnonzero(cf.eta > 0)
+        im = np.flatnonzero(cf.eta < 0)
+        sign = 1.0 if mode == PairMode.HORIZONTAL.value else -1.0
+    kdp = scipy.spatial.cKDTree(g[ip])
+    kdm = scipy.spatial.cKDTree(sign * g[im])
+    coo = kdp.sparse_distance_matrix(kdm, gvtol, output_type='coo_matrix')
+    if doplot:
+        fig, ax = plt.subplots()
+        ax.hist(coo.data.flat, bins=500)
+        ax.set(xlabel='gvtol', ylabel='count')
+        plt.show()
+    return ip[coo.row], im[coo.col]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Box-beam / TDXRD 4D Friedel pair matching
+# ─────────────────────────────────────────────────────────────────────────────
+def calc_tth_eta(c, pi, pj):
+    """
+    Two-theta and eta of a Friedel pair (box-beam) from the lab coordinates of
+    its two peaks. Returns (tth, eta) in degrees.
+    """
+    dX = c.xl[pi] + c.xl[pj]
+    dY = c.yl[pi] + c.yl[pj]
+    dZ = c.zl[pi] - c.zl[pj]
+    r = np.sqrt(dY * dY + dZ * dZ)
+    tth = np.degrees(np.arctan2(r, dX))
+    eta = np.degrees(np.arctan2(-dY, dZ))
+    return tth, eta
+
+
+def match_box_beam(cf_in, womega=1.0, weta=1.0, wtth=1.5, wI=0.5,
+                   pair_type='vertical_pair', max_dist=1.0, ringds=None,
+                   doplot=False):
+    """
+    Match Friedel pairs in box-beam data using a 4D KDTree search.
+
+    The search dimensions are (omega, eta, tth, log(intensity)), scaled by
+    womega / weta / wtth / wI. The partner tree is built by applying the
+    requested relationship to omega / eta. This is the box-beam route used by
+    the TDXRD notebooks, kept free of any unit-cell / ring information.
+
+    Parameters
+    ----------
+    cf_in     : ImageD11 columnfile with columns omega, eta, tth, sum_intensity,
+                xl, yl, zl and a 'wavelength' parameter.
+    womega/weta/wtth/wI : search-space weights (angle / logI units).
+    pair_type : PairMode | str; the relationship (default 'vertical_pair').
+                vertical   : omega -> omega+180, eta -> 180-eta
+                diagonal   : eta -> 180+eta
+                horizontal : eta -> -eta
+    max_dist  : normalised cutoff passed to the KDTree distance matrix.
+    ringds    : optional array of d*-spacings only used to draw red ring lines
+                on the optional plots (unit cell stays outside this module).
+    doplot    : draw the pair-distance diagnostics.
+
+    Returns
+    -------
+    cpair: a columnfile of the matched pairs (both members), with tth, ds, eta
+           set from the pair position and gx, gy, gz recomputed.
+    """
+    mode = _resolve_mode(pair_type)
+    cf = cf_in
+    inds = np.arange(cf.nrows)
+
+    ref_cols = np.column_stack([
+        womega * (cf.omega % 360),
+        weta   * (cf.eta % 360),
+        wtth   * cf.tth,
+        wI     * np.log10(cf.sum_intensity),
+    ])
+
+    if mode == PairMode.VERTICAL.value:
+        partner_om = (cf.omega + 180) % 360
+        partner_et = (180 - cf.eta) % 360
+    elif mode == PairMode.DIAGONAL.value:
+        partner_om = cf.omega % 360
+        partner_et = (180 + cf.eta) % 360
+    else:  # horizontal
+        partner_om = cf.omega % 360
+        partner_et = (-cf.eta) % 360
+
+    partner_cols = np.column_stack([
+        womega * partner_om,
+        weta   * partner_et,
+        wtth   * cf.tth,
+        wI     * np.log10(cf.sum_intensity),
+    ])
+
+    t1 = scipy.spatial.cKDTree(ref_cols)
+    t2 = scipy.spatial.cKDTree(partner_cols)
+    coo = t1.sparse_distance_matrix(t2, max_distance=max_dist, output_type='coo_matrix')
+
+    p1 = inds[coo.row]
+    p2 = inds[coo.col]
+    tth, eta = calc_tth_eta(cf, p1, p2)
+    s1 = cf.sum_intensity[p1]
+    s2 = cf.sum_intensity[p2]
+    dstar = 2 * np.sin(np.radians(tth) / 2) / cf.parameters.get('wavelength')
+
+    if doplot:
+        fig, ax = plt.subplots(2, 1, figsize=(20, 6), layout='constrained', sharex=True)
+        ax[0].hist2d(dstar, eta, bins=(2000, 360), norm='log', weights=s1 + s2)
+        ax[0].set(ylabel=r'$\eta~(\degree)$')
+        if ringds is not None:
+            ax[0].plot(ringds, np.zeros_like(ringds), '|r', lw=1, ms=90)
+        ax[1].hist2d(dstar, coo.data, bins=(2000, 128), norm='log')
+        ax[1].set(xlabel=r'$d^{*}~(\AA^{-1})$', ylabel='distance for search')
+        if ringds is not None:
+            ax[1].vlines(ringds, -50, 50, color='red')
+        fig.suptitle(r'Friedel pairs: $d^{*}$ vs $\eta$ and search distance')
+        plt.show()
+
+    # build paired columnfile (no ring selection here — that is the caller's job)
+    c1 = cf.copyrows(p1)
+    c2 = cf.copyrows(p2)
+    if 'ds' not in c1.titles:
+        c1.addcolumn(np.zeros(c1.nrows), 'ds')
+        c2.addcolumn(np.zeros(c2.nrows), 'ds')
+    c1.tth[:] = tth
+    c2.tth[:] = tth
+    c1.ds[:] = dstar
+    c2.ds[:] = dstar
+    c1.eta[:] = eta
+    # partner eta on the opposite side
+    partner_half = {
+        PairMode.VERTICAL.value: (180 - eta),
+        PairMode.DIAGONAL.value: (180 + eta),
+        PairMode.HORIZONTAL.value: (-eta),
+    }[mode]
+    c2.eta[:] = np.where(partner_half > 180, partner_half - 360, partner_half)
+
+    cpair = columnfile.colfile_from_dict(
+        {t: np.concatenate((c1[t], c2[t])) for t in c1.titles})
+    cpair.parameters = cf.parameters
+    for name in ('gx', 'gy', 'gz'):
+        if name not in cpair.titles:
+            cpair.addcolumn(np.zeros(cpair.nrows), name)
+    cpair.gx[:], cpair.gy[:], cpair.gz[:] = transform.compute_g_vectors(
+        cpair.tth, cpair.eta, cpair.omega, cpair.parameters.get('wavelength'))
+
+    return cpair
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Robust y0 fitting from Friedel pair positions
+# ─────────────────────────────────────────────────────────────────────────────
+def fit_y0(cf, pairs, y0s, npks=100_000, nbx=256, nby=256,
+           fit_window=15, seed=0, doplot=False):
+    """
+    Find the beam-centre offset y0 that best focuses the pair reconstruction,
+    i.e. maximises the standard deviation of the 2D histogram of (sx, sy).
+
+    Sweeps y0s on a subsample using the affine relation s(y0) = s0 - y0*v
+    (no per-y0 solve), scores every y0 on one fixed grid via a single
+    bincount, then fits a parabola to the peak for sub-grid-step resolution.
+
+    Parameters
+    ----------
+    cf         : ImageD11 columnfile
+    pairs      : (ip, im) arrays of cf indices for each pair
+    y0s        : array of y0 values to scan
+    npks       : max pairs to subsample (peak location scales like 1/sqrt(n))
+    nbx, nby   : fixed grid size used for scoring
+    fit_window : points either side of the argmax for the parabola fit
+    seed       : rng seed for the subsample
+    doplot     : draw the stdev curve, fit, and vertex
+
+    Returns
+    -------
+    best_y0 : float, the fitted optimum
+    y0s     : the scan grid (unchanged)
+    stdevs  : stdev of the fixed-grid histogram at each y0
+    """
+    s0, v = locate_pairs_affine(cf, pairs)
+    y0s = np.asarray(y0s)
+    n_y0 = len(y0s)
+
+    # subsample the pairs
+    rng = np.random.default_rng(seed)
+    N = s0.shape[1]
+    n_sub = min(N, npks)
+    sub = rng.choice(N, n_sub, replace=False) if N > n_sub else slice(None)
+    s0x, s0y = s0[0, sub], s0[1, sub]
+    vx,  vy  = v[0, sub],  v[1, sub]
+
+    # point positions over the whole sweep: (n_sub, n_y0)
+    sx = s0x[:, None] - y0s[None, :] * vx[:, None]
+    sy = s0y[:, None] - y0s[None, :] * vy[:, None]
+
+    # one fixed grid for every y0 (robust extent so outliers don't blow it up)
+    xlo, xhi = np.percentile(sx, [0.05, 99.95])
+    ylo, yhi = np.percentile(sy, [0.05, 99.95])
+    xedges = np.linspace(xlo, xhi, nbx + 1)
+    yedges = np.linspace(ylo, yhi, nby + 1)
+
+    ix = np.searchsorted(xedges, sx, 'right') - 1
+    iy = np.searchsorted(yedges, sy, 'right') - 1
+    ok = (ix >= 0) & (ix < nbx) & (iy >= 0) & (iy < nby)   # drops out-of-grid, like histogram2d
+
+    col  = np.broadcast_to(np.arange(n_y0), sx.shape)
+    flat = col[ok] * (nbx * nby) + ix[ok] * nby + iy[ok]   # (y0, bin) -> one index
+    counts = np.bincount(flat, minlength=n_y0 * nbx * nby).reshape(n_y0, nbx * nby)
+
+    B = nbx * nby
+    sumsq = np.einsum('ij,ij->i', counts, counts).astype(float)   # Σc² per y0
+    Ncol  = counts.sum(1)                                          # in-grid points per y0
+    stdevs = np.sqrt(sumsq / B - (Ncol / B) ** 2)                 # == std of the 2D hist
+
+    # parabola fit to the peak -> sub-grid-step vertex
+    k = np.argmax(stdevs)
+    lo, hi = max(0, k - fit_window), min(n_y0, k + fit_window + 1)
+    a, b, c = np.polyfit(y0s[lo:hi], stdevs[lo:hi], 2)
+    best_y0 = -b / (2 * a)
+
+    if doplot:
+        best_std = np.polyval((a, b, c), best_y0)
+        y0_fit = np.linspace(y0s[lo], y0s[hi - 1], 200)
+        fig, ax = plt.subplots()
+        ax.plot(y0s, stdevs, label='stdev')
+        ax.plot(y0_fit, np.polyval((a, b, c), y0_fit),
+                color='red', ls='--', label='parabola fit')
+        ax.axvspan(y0s[lo], y0s[hi - 1], color='red', alpha=0.08)
+        ax.axvline(best_y0, color='red', label=f'best_y0 = {best_y0:.3f}')
+        ax.plot(best_y0, best_std, 'ro')
+        ax.set(xlabel='y0', ylabel='stdev')
+        ax.legend()
+        plt.show()
+
+    return best_y0, y0s, stdevs
