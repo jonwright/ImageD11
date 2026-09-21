@@ -376,3 +376,75 @@ def test_legacy_alias_survives_filter_roundtrip(tmp_path):
     assert copied.getcolumn('vertical_pair_id') is copied.getcolumn('omega_pair_id')
     rows = loaded.copyrows(np.arange(2))
     assert rows.getcolumn('vertical_pair_id') is rows.getcolumn('omega_pair_id')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# self-contained Si_cube cf_4d fixture
+# ─────────────────────────────────────────────────────────────────────────────
+import os
+from pathlib import Path
+
+FIXTURE = Path(__file__).parent / "data" / "Si_cube_friedel_test.cf_4d.h5"
+FIXTURE_UBI = Path(__file__).parent / "data" / "Si_cube_friedel_test.ubi"
+SI_A = 5.43094  # silicon cell length (Angstrom)
+
+
+def _allowed_si_rings(gmax):
+    """|g| of the allowed (centrosymmetric FCC) silicon reflections <= gmax."""
+    import itertools
+    s = set()
+    for h, k, l in itertools.product(range(-12, 13), repeat=3):
+        if h == k == l == 0:
+            continue
+        if (h + k) % 2 or (k + l) % 2 or (l + h) % 2:
+            continue
+        s.add(round(np.sqrt(h * h + k * k + l * l) / SI_A, 3))
+    return np.array(sorted(v for v in s if v <= gmax))
+
+
+def _ring_residual(gg, rings):
+    j = np.argmin(np.abs(rings - gg))
+    return abs(rings[j] - gg) / gg * 100.0
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="Si_cube cf_4d fixture not present")
+def test_si_cube_cf4d_fixture_geometry_and_friedel_pairs():
+    """The self-contained cf_4d round-trips its geometry and yields Friedel pairs
+    that sit on the allowed silicon reflections."""
+    c = columnfile.columnfile(str(FIXTURE))
+    # geometry + cell restored from the HDF5 attributes
+    assert abs(c.parameters.get('wavelength') - 0.1897) < 1e-3
+    assert abs(c.parameters.get('distance') - 151015.75) < 1.0
+    assert abs(float(c.parameters.get('cell__a')) - SI_A) < 1e-4
+    # the raw peak columns are present, the computed geometry is not stored
+    for col in ('sc', 'fc', 'omega', 'dty', 'sum_intensity', 'Number_of_pixels'):
+        assert col in c.titles
+    assert 'gx' not in c.titles and 'tth' not in c.titles
+
+    c.updateGeometry()
+    assert 'gx' in c.titles and 'tth' in c.titles
+
+    g = np.sqrt(c.gx ** 2 + c.gy ** 2 + c.gz ** 2)
+    rings = _allowed_si_rings(g.max())
+    ip, im = find_pairs(c, gvtol=0.005, mode='diagonal_pair')
+    assert len(ip) > 0
+    # both members of a pair are on (near) the same silicon ring
+    sag = np.abs(g[ip] - g[im]) / np.maximum(g[ip], g[im]) * 100.0
+    assert np.median(sag) < 0.5
+    r1 = np.array([_ring_residual(x, rings) for x in g[ip]])
+    r2 = np.array([_ring_residual(x, rings) for x in g[im]])
+    both = (r1 < 1.0) & (r2 < 1.0)
+    assert both.mean() > 0.9
+
+    # cross-check against the indexed grain orientation: pairs are real Si
+    # reflections (integer hkl under h = UB.g) that flip hkl -> -h,-k,-l.
+    if FIXTURE_UBI.exists():
+        UB = np.loadtxt(str(FIXTURE_UBI)).reshape(3, 3)
+        gmat = np.column_stack((c.gx, c.gy, c.gz))     # (n,3)
+        hkl = (UB @ gmat.T)                            # (3,n); hkl = UB.g
+        ni = np.abs(hkl - np.round(hkl)).max(axis=0)
+        iok = (ni[ip] < 0.1) & (ni[im] < 0.1)
+        assert iok.mean() > 0.9, "pairs should index to silicon hkl"
+        flip = np.linalg.norm(hkl[:, ip] + hkl[:, im], axis=0)
+        assert (flip[iok] < 0.1).all(), "indexed pairs must be hkl -> -h,-k,-l"
+

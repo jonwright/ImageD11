@@ -605,8 +605,58 @@ def colfile_from_dict( c ):
 
 try:
     import h5py, os
+    def _attr_compat(v):
+        """Coerce a parameter value into something h5py can store as an attr."""
+        try:
+            import numpy as np
+            if isinstance(v, np.bool_):
+                return bool(v)
+            if isinstance(v, np.integer):
+                return int(v)
+            if isinstance(v, np.floating):
+                return float(v)
+        except ImportError:
+            pass
+        if isinstance(v, (bytes, bytearray)):
+            return v.decode()
+        return v
+
+    def _store_parameter_attrs(g, params):
+        """Store parameters as individual HDF5 attributes on the peaks group."""
+        for k, v in params.get_parameters().items():
+            try:
+                g.attrs[k] = _attr_compat(v)
+            except Exception:
+                # skip anything h5py cannot store as an attribute
+                continue
+
+    def _restore_parameter_attrs(col, g):
+        """Rebuild a parameters object from the group attributes."""
+        skip = ('ImageD11_type', 'sorted_by')
+        d = {}
+        for k in list(g.attrs.keys()):
+            if k in skip:
+                continue
+            v = g.attrs[k]
+            if isinstance(v, (bytes, bytearray)):
+                v = v.decode()
+            else:
+                try:
+                    import numpy as np
+                    if isinstance(v, np.bool_):
+                        v = bool(v)
+                    elif isinstance(v, np.integer):
+                        v = int(v)
+                    elif isinstance(v, np.floating):
+                        v = float(v)
+                except ImportError:
+                    pass
+            d[k] = v
+        if d:
+            col.parameters.set_parameters(d)
+
     def colfile_to_hdf( colfile, hdffile, name=None, compression=None,
-                        compression_opts=None):
+                        compression_opts=None, dtype=np.float64):
         """
         Copy a columnfile into hdf file
         FIXME TODO - add the parameters somewhere (attributes??)
@@ -635,6 +685,9 @@ try:
 
         if getattr(c, 'sortedby', None) is not None:
             g.attrs['sorted_by'] = str(c.sortedby)
+        # store the parameters (instrument/geometry) with the peaks so a colfile
+        # is self-contained; restored on read by colfile_from_hdf.
+        _store_parameter_attrs(g, c.parameters)
         # alias columns that share the same underlying numpy buffer are written
         # once and then hard-linked, so the old and new names refer to the same
         # dataset (e.g. 'vertical_pair_id' <-> 'omega_pair_id').
@@ -643,8 +696,8 @@ try:
             if t in INTS:
                 ty = np.int64
             else:
-                ty = np.float64
-            # print "adding",t,ty
+                ty = dtype
+            # astype() is a no-op copy if already the right dtype
             dat = getattr(c, t).astype( ty )
             if t in list(g.keys()):
                 if g[t].shape != dat.shape:
@@ -666,10 +719,9 @@ try:
         if opened:
             h.close()
 
-    def colfileobj_to_hdf( cf, hdffile, name=None):
+    def colfileobj_to_hdf( cf, hdffile, name=None, dtype=np.float64):
         """
         Save a columnfile into hdf file format
-        FIXME TODO - add the parameters somewhere (attributes??)
         """
         h = h5py.File(hdffile, 'a' )
         if name is None:
@@ -680,12 +732,13 @@ try:
             print(name, h)
             raise
         g.attrs['ImageD11_type'] = 'peaks'
+        _store_parameter_attrs(g, cf.parameters)
         written = {}
         for t in cf.titles:
             if t in INTS:
                 ty = np.int64
             else:
-                ty = np.float64
+                ty = dtype
             src = id(getattr(cf, t))
             if src in written and (g[written[src]].shape == getattr(cf, t).shape):
                 g[t] = g[written[src]]   # hard link
@@ -744,6 +797,7 @@ try:
         else:
             col = obj
         col.sortedby = g.attrs.get('sorted_by', None)
+        _restore_parameter_attrs(col, g)
         col.nrows = len( g[newtitles[0]] )
         # hard-linked datasets (e.g. the canonical + legacy Friedel pair-id
         # columns) read once and share the same numpy array under both names.
