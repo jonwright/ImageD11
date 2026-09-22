@@ -1,5 +1,4 @@
 
-# coding: utf-8
 from __future__ import print_function, division
 
 import numpy as np
@@ -219,7 +218,7 @@ class EpsSigSolver:
         Compute elastic strain and stress in Lab coordinates for all ubis, using the stiffness matrix in self.Cij. 
         Computation is done first in the grain coordinate system, and then stress in lab coordinates is obtained by
         rotating the 3x3 stress tensor from the grain to the lab coordinate system using the following transormation
-        σ' = RT.σ.R where R is the rotation matrix yielded by the polar decomposition of the finite deformation
+        sigma' = RT.sigma.R where R is the rotation matrix yielded by the polar decomposition of the finite deformation
         gradient tensor F.
         
         Returns strain and stress as two lists of 3x3 symmetric tensors 'eps_Lab' and 'sigma_Lab'. 
@@ -271,7 +270,7 @@ class EpsSigSolver:
         
         default : e11, e22, e33, e23, e13, e12          | s11, s22, s33, s23, s13, s12
         xfab    : e11, e12, e13, e22, e23, e33          | s11, s12, s13, s22, s23, s33
-        mandel  : e11, e22, e33, √2.e22, √2.e23, √2.e33 | s11, s22, s33, √2.s22, √2.s23, √2.s33
+        mandel  : e11, e22, e33, sqrt2.e22, sqrt2.e23, sqrt2.e33 | s11, s22, s33, sqrt2.s22, sqrt2.s23, sqrt2.s33
         voigt   : e11, e22, e33, 2.e23, 2.e13, 2.e12    | s11, s22, s33, s23, s13, s12
         
         Return
@@ -340,12 +339,12 @@ class EpsSigSolver:
             
     
     def invariant_props(self, dname):
-        # NOTE : not sure about the expression of von Mises strain. In any case it is related to √J2 by a multiplication factor k,
-        # but it seems to be different from the definition of von Mises stress √(3.J2).
+        # NOTE : not sure about the expression of von Mises strain. In any case it is related to sqrtJ2 by a multiplication factor k,
+        # but it seems to be different from the definition of von Mises stress sqrt(3.J2).
         # see https://www.continuummechanics.org/vonmisesstress.html
         """
         compute invariant properties for selected data column
-        compute invariant properties for selected data column: volumetric strain / pressure (-I1/3) and von mises strain /stress (√3.J2)
+        compute invariant properties for selected data column: volumetric strain / pressure (-I1/3) and von mises strain /stress (sqrt3.J2)
         
         dname (str) : name of the input data column. Must be a non-deviatoric 3x3 tensors 
         
@@ -354,10 +353,10 @@ class EpsSigSolver:
         New instances added to EpsSigSolver, containing list of floats
         if strain tensor in input
         dname+'_vol' : volumetric strain 
-        dname+'_vM'  : von Mises strain (√2.J2)
+        dname+'_vM'  : von Mises strain (sqrt2.J2)
         if stress tensor in input:
         dname+'_P_hyd'   : hydrostatic Pressure (if stress tensor in input)
-        dname+'_vM'  : von Mises stress (√3.J2)
+        dname+'_vM'  : von Mises stress (sqrt3.J2)
         """
         assert dname in dir(self), 'dname not recognized'
         assert '_d_' not in dname, 'tensor is deviatoric. Please use the non-deviatoric tensor'
@@ -391,8 +390,8 @@ class EpsSigSolver:
         New instances dname+'_eigvals' , dname+'_eigvecs' added to EpsSigSolver, containing respectively a list of eigenvalues and eigenvectors
         
         eigvals (1x3 array) : Principal components in decreasing order from the largest positive to largest negative
-                              for strain : ε1 > ε2 > ε3 (positive strain = elongation)
-                              for stress σ3 > σ2 > σ1 (positive stress  = tension)
+                              for strain : epsilon1 > epsilon2 > epsilon3 (positive strain = elongation)
+                              for stress sigma3 > sigma2 > sigma1 (positive stress  = tension)
         eigvecs (3x3 array) : Normalized principal component vectors by columns sorted accordingly to eigvals
         """
         assert dname in dir(self), 'dname not recognized'
@@ -429,7 +428,7 @@ def full_3x3_to_vector(T, output_format = 'default', is_strain=True):
 
     default : e11, e22, e33, e23, e13, e12          | s11, s22, s33, s23, s13, s12
     xfab    : e11, e12, e13, e22, e23, e33          | s11, s12, s13, s22, s23, s33
-    mandel  : e11, e22, e33, √2.e22, √2.e23, √2.e33 | s11, s22, s33, √2.s22, √2.s23, √2.s33
+    mandel  : e11, e22, e33, sqrt2.e22, sqrt2.e23, sqrt2.e33 | s11, s22, s33, sqrt2.s22, sqrt2.s23, sqrt2.s33
     voigt   : e11, e22, e33, 2.e23, 2.e13, 2.e12    | s11, s22, s33, s23, s13, s12
     """
  
@@ -463,7 +462,7 @@ def vector_to_full_3x3(vec, input_format='default', is_strain=True):
     
     default : e11, e22, e33, e23, e13, e12          | s11, s22, s33, s23, s13, s12
     xfab    : e11, e12, e13, e22, e23, e33          | s11, s12, s13, s22, s23, s33
-    mandel  : e11, e22, e33, √2.e22, √2.e23, √2.e33 | s11, s22, s33, √2.s22, √2.s23, √2.s33
+    mandel  : e11, e22, e33, sqrt2.e22, sqrt2.e23, sqrt2.e33 | s11, s22, s33, sqrt2.s22, sqrt2.s23, sqrt2.s33
     voigt   : e11, e22, e33, 2.e23, 2.e13, 2.e12    | s11, s22, s33, s23, s13, s12
     """
  

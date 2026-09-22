@@ -2144,7 +2144,7 @@ class TensorMap:
                 
     # --- final intensity normalisation, selected by mode ---
         if sf_normalisation:
-            # percentile over WON voxels only — including the cutoff_level background
+            # percentile over WON voxels only - including the cutoff_level background
             # (usually most of the map) drags the percentile onto cutoff_level when
             # grains are sparse, collapsing norm_scale and saturating everything to 1.
             won = raw_intensity_map[grain_labels_map != -1]

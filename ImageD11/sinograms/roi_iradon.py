@@ -412,7 +412,7 @@ def mlem(sino,
     An "MLEM" algorithm from XRDUA was used in this paper:
 
     "Impurity precipitation in atomized particles evidenced by nano x-ray diffraction computed tomography"
-    Anne Bonnin; Jonathan P. Wright; Rémi Tucoulou; Hervé Palancher
+    Anne Bonnin; Jonathan P. Wright; Remi Tucoulou; Herve Palancher
     Appl. Phys. Lett. 105, 084103 (2014) https://doi.org/10.1063/1.4894009
 
     This python code implements something similar based on a youtube video (https://www.youtube.com/watch?v=IhETD4nSJec)

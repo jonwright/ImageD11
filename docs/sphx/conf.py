@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # ImageD11 documentation build configuration file, created by
 # sphinx-quickstart on Thu Sep 13 12:28:22 2012.

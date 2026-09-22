@@ -1,4 +1,3 @@
-# coding: utf-8
 #!/usr/bin/env python
 from __future__ import print_function
 """
@@ -51,9 +50,9 @@ def _ideal_pars():
     return _load()[1]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1) ideal forward model pairs perfectly in all three modes
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def ideal_sim():
     ubi, pars = _load()
@@ -86,9 +85,9 @@ def test_ideal_pairing_is_perfect(ideal_sim, mode):
         assert flip.mean() > 0.99
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2) instrument mismatches degrade the pairing (tolerance must be relaxed)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 _PERTURBATIONS = {
     "wedge_0p5deg":  lambda p: dict(p, wedge=0.5),
     "tilt_x_zero":   lambda p: dict(p, tilt_x=0.0),
@@ -115,9 +114,9 @@ def test_perturbations_need_a_larger_tolerance():
         assert n_loose >= 0.9 * n_ideal, "%s not recoverable even at 0.05" % name
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3) forward model matches the observed Si_cube peaks
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def test_forward_model_matches_observed():
     ubi, pars = _load()
     obs = columnfile.columnfile(_data_path("Si_cube_friedel_test.cf_4d.h5"))

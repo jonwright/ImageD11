@@ -19,3 +19,15 @@ The codebase must stay importable on **Python 2.7**. When editing, do **not** us
 
 Run tests under the py3 environment, but keep the syntax 2.7-compatible.
 
+## ASCII-only source
+
+- Do **not** introduce non-ASCII characters into `.py` files. They never render
+  properly across terminals/editors and force a `# coding:` declaration for
+  Python 2.7. Use ASCII equivalents instead:
+  `-`/`--` for dashes (box-drawing `─`, `—`, `–`), `->` for `→`, `...` for `…`,
+  `deg` for `°`, `Angstrom` for `Å`, `^2`/`1` for superscripts, and the spelled
+  form for Greek letters (`omega`, `sigma`, `delta`, `theta`, `epsilon`, `Sigma`).
+- No `# coding: utf-8`-style declarations are needed because the sources are
+  ASCII. (`.ipynb` files may keep unicode; the browser usually renders it.)
+
+

@@ -2153,7 +2153,7 @@ def disorientation_deprecated(ori1, ori2, crystal_structure=Symmetry.triclinic):
 def misorientation_angle_from_delta(delta):
     """
     Compute the misorientation angle from the misorientation matrix.
-    It is defined as: ω = arccos((trace(Δg) - 1)/2)
+    It is defined as: omega = arccos((trace(deltag) - 1)/2)
     Rewritten to be supported by numba.njit
     
     :param delta: The 3x3 misorientation matrix.

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# coding: utf-8
 
 # Try to build the point-by-point mapping code ...
 from __future__ import print_function, division
