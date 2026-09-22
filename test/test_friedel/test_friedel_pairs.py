@@ -384,8 +384,8 @@ def test_legacy_alias_survives_filter_roundtrip(tmp_path):
 import os
 from pathlib import Path
 
-FIXTURE = Path(__file__).parent / "data" / "Si_cube_friedel_test.cf_4d.h5"
-FIXTURE_UBI = Path(__file__).parent / "data" / "Si_cube_friedel_test.ubi"
+FIXTURE = Path(__file__).parent.parent / "data" / "Si_cube_friedel_test.cf_4d.h5"
+FIXTURE_UBI = Path(__file__).parent.parent / "data" / "Si_cube_friedel_test.ubi"
 SI_A = 5.43094  # silicon cell length (Angstrom)
 
 
