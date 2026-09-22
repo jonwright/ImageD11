@@ -48,7 +48,6 @@ from tqdm import tqdm
 import scipy.spatial
 from scipy.sparse import csr_matrix
 
-import matplotlib.pyplot as plt
 from ImageD11 import columnfile, transform
 
 logger = logging.getLogger(__name__)
@@ -680,6 +679,7 @@ class PeakSubsets:
         Significant mismatch suggests an incorrect y0 (for dty), sample movement,
         or a beam issue during scanning.
         """
+        import matplotlib.pyplot as plt
         # -- auto-detect mode -------------------------------------------------
         mode = None
         for attr in ['scans_LUT', 'eta_bins_LUT']:
@@ -2109,6 +2109,7 @@ def plot_pair_distances(cf, pair_type='omega', bins=50, log_scale=False, **kwarg
     bins      : number of histogram bins
     log_scale : bool, log y-axis
     """
+    import matplotlib.pyplot as plt
     dists, _ = get_pair_distances(cf, pair_type)
         
     # -- plot -------------------------------------------------------------
@@ -2420,6 +2421,7 @@ def find_pairs(cf, gvtol=0.002, mode='diagonal_pair', doplot=False):
     kdm = scipy.spatial.cKDTree(sign * g[im])
     coo = kdp.sparse_distance_matrix(kdm, gvtol, output_type='coo_matrix')
     if doplot:
+        import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
         ax.hist(coo.data.flat, bins=500)
         ax.set(xlabel='gvtol', ylabel='count')
@@ -2514,6 +2516,7 @@ def match_box_beam(cf_in, womega=1.0, weta=1.0, wtth=1.5, wI=0.5,
     dstar = 2 * np.sin(np.radians(tth) / 2) / cf.parameters.get('wavelength')
 
     if doplot:
+        import matplotlib.pyplot as plt
         fig, ax = plt.subplots(2, 1, figsize=(20, 6), layout='constrained', sharex=True)
         ax[0].hist2d(dstar, eta, bins=(2000, 360), norm='log', weights=s1 + s2)
         ax[0].set(ylabel=r'$\eta~(\degree)$')
@@ -2631,6 +2634,7 @@ def fit_y0(cf, pairs, y0s, npks=100000, nbx=256, nby=256,
     if doplot:
         best_std = np.polyval((a, b, c), best_y0)
         y0_fit = np.linspace(y0s[lo], y0s[hi - 1], 200)
+        import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
         ax.plot(y0s, stdevs, label='stdev')
         ax.plot(y0_fit, np.polyval((a, b, c), y0_fit),
