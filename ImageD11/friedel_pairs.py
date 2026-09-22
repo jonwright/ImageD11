@@ -45,8 +45,20 @@ from collections import namedtuple
 from contextlib import contextmanager
 from tqdm import tqdm
 
+import scipy
 import scipy.spatial
 from scipy.sparse import csr_matrix
+
+# cKDTree.query only accepts the workers kwarg from scipy >= 1.6.0.
+# Older scipy (as used on the Python 2.7 CI job) rejects it with a TypeError.
+def _scipy_version_tuple():
+    import re as _re
+    m = _re.match(r'(\d+)\.(\d+)', scipy.__version__)
+    if m is None:
+        return (0, 0)
+    return (int(m.group(1)), int(m.group(2)))
+
+_SCIPY_QUERY_HAS_WORKERS = _scipy_version_tuple() >= (1, 6)
 
 from ImageD11 import columnfile, transform
 
@@ -1690,11 +1702,10 @@ def _compute_dist_matrix(space_ref, space_partner, dist_cutoff):
     """
     tree_partner = scipy.spatial.cKDTree(space_partner)
     # k=1: only the single nearest neighbour
-    dists, col_ind = tree_partner.query(
-        space_ref,
-        k=1,
-        distance_upper_bound=dist_cutoff,
-        workers=1)     
+    _query_kwargs = dict(k=1, distance_upper_bound=dist_cutoff)
+    if _SCIPY_QUERY_HAS_WORKERS:
+        _query_kwargs['workers'] = 1
+    dists, col_ind = tree_partner.query(space_ref, **_query_kwargs)
 
     # filter out points with no neighbour within cutoff
     valid    = np.isfinite(dists)
