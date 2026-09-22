@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from __future__ import print_function
 """
 Subset / smoke testing for the Friedel-pair notebooks.
 

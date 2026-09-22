@@ -441,7 +441,7 @@ def test_si_cube_cf4d_fixture_geometry_and_friedel_pairs():
     if FIXTURE_UBI.exists():
         UB = np.loadtxt(str(FIXTURE_UBI)).reshape(3, 3)
         gmat = np.column_stack((c.gx, c.gy, c.gz))     # (n,3)
-        hkl = (UB @ gmat.T)                            # (3,n); hkl = UB.g
+        hkl = np.dot(UB, gmat.T)                       # (3,n); hkl = UB.g
         ni = np.abs(hkl - np.round(hkl)).max(axis=0)
         iok = (ni[ip] < 0.1) & (ni[im] < 0.1)
         assert iok.mean() > 0.9, "pairs should index to silicon hkl"

@@ -2629,7 +2629,7 @@ def fit_y0(cf, pairs, y0s, npks=100_000, nbx=256, nby=256,
         ax.plot(y0_fit, np.polyval((a, b, c), y0_fit),
                 color='red', ls='--', label='parabola fit')
         ax.axvspan(y0s[lo], y0s[hi - 1], color='red', alpha=0.08)
-        ax.axvline(best_y0, color='red', label=f'best_y0 = {best_y0:.3f}')
+        ax.axvline(best_y0, color='red', label='best_y0 = {:.3f}'.format(best_y0))
         ax.plot(best_y0, best_std, 'ro')
         ax.set(xlabel='y0', ylabel='stdev')
         ax.legend()
