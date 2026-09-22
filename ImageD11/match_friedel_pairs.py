@@ -48,10 +48,14 @@ import contextlib
 import time
 import datetime
 import subprocess
+
+# time.perf_counter is Python 3.3+; fall back to time.time on Python 2.7.
+try:
+    _perf_counter = time.perf_counter
+except AttributeError:
+    _perf_counter = time.time
  
 import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
 
 
 # Python path: needs to be sorted out. I copied the stuff we put at the beginning of notebooks to load ImageD11 from local user folder (cloned from github), but in production this should not be here
@@ -108,6 +112,8 @@ class Options:
         self.slurm_cpus          = 16      # should match n_workers
         # y0 for reconstruction
         self.y0                 = None
+        # produce diagnostic figures (saved as SVG) during the run
+        self.plot_option        = True
 
     @property
     def tol_logI_value(self):
@@ -221,12 +227,17 @@ def _log_path(dsfile):
  
 def _save_figure(fig, path, logger):
     try:
+        import matplotlib.pyplot as plt
         fig.savefig(path, format='svg', bbox_inches='tight')
         logger.info('Figure saved: %s', path)
     except Exception as e:
         logger.warning('Could not save figure %s: %s', path, e)
     finally:
-        plt.close(fig)
+        try:
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+        except Exception:
+            pass
 
 
 # =============================================================================
@@ -345,7 +356,9 @@ def _run_pair_type(pair_type, FPIndexer, opts, cf, ds,
     logger.info('=' * 60)
     logger.info('PAIRING  [%s]', pair_type)
     logger.info('=' * 60)
- 
+
+    plot = getattr(opts, 'plot_option', True)
+
     chunk_type_map = {'omega': 'scans', 'eta': 'eta_bins'}
  
     if use_chunks:
@@ -355,14 +368,15 @@ def _run_pair_type(pair_type, FPIndexer, opts, cf, ds,
         FPIndexer.set_peak_subsets(n_eta_bins=opts.n_eta_bins, y0 = opts.y0)
         FPIndexer.sort_peak_subsets(pair_type=pair_type)
         # symmetry check figure
-        try:
-            fig_sym, _ = FPIndexer.PeakSubsets.check_symmetry()
-            _save_figure(fig_sym,
-                         _figure_path(dsfile,
-                                      '{}_pair_symmetry'.format(pair_type)),
-                         logger)
-        except Exception as e:
-            logger.warning('check_symmetry failed: %s', e)
+        if plot:
+            try:
+                fig_sym, _ = FPIndexer.PeakSubsets.check_symmetry()
+                _save_figure(fig_sym,
+                             _figure_path(dsfile,
+                                          '{}_pair_symmetry'.format(pair_type)),
+                             logger)
+            except Exception as e:
+                logger.warning('check_symmetry failed: %s', e)
  
         cf_paired = FPIndexer.match_friedel_pairs_by_chunks(
             chunk_type=chunk_type,
@@ -383,44 +397,47 @@ def _run_pair_type(pair_type, FPIndexer, opts, cf, ds,
             doplot=False)
  
     # -- pair distance plot --------------------------------------------
-    try:
-        fig_dist, _ = fp.plot_pair_distances(cf=cf_paired, pair_type=pair_type)
-        _save_figure(fig_dist,
-                     _figure_path(dsfile,
-                                  '{}_pair_distances'.format(pair_type)),
-                     logger)
-    except Exception as e:
-        logger.warning('plot_pair_distances failed: %s', e)
- 
-    # -- sample reconstruction plot ------------------------------------
-    try:
-        i1, i2 = fp.get_pairs(cf_paired, pair_type)
-        if pair_type == 'omega':
-            sx, sy = fp.locate_omega_pairs(cf_paired, (i1, i2), ds=ds, y0=ds.y0)
-        else:
-            sx, sy = fp.locate_eta_pairs(cf_paired, (i1, i2), ds=ds, y0=ds.y0)
- 
-        valid = np.isfinite(sx) & np.isfinite(sy)
-        if valid.sum() > 0 and hasattr(ds, 'ybinedges'):
-            hist = np.histogram2d(sx[valid] + ds.y0,
-                                  sy[valid] + ds.y0,
-                                  bins=ds.ybinedges)[0]
-            fig_rec, ax = plt.subplots(1, 1, layout='constrained',
-                                       figsize=(6, 6))
-            im = ax.pcolormesh(ds.ybinedges, ds.ybinedges, hist,
-                               vmax=np.percentile(hist.ravel(), 99), rasterized=True)
-            ax.set_aspect(1)
-            ax.set(title='{} pairs - sample reconstruction'.format(pair_type),
-                   ylabel='Sample Y axis',
-                   xlabel='Sample X axis')
-            plt.colorbar(im, ax=ax, orientation='vertical',
-                         pad=0.04, shrink=0.7)
-            _save_figure(fig_rec,
+    if plot:
+        try:
+            fig_dist, _ = fp.plot_pair_distances(cf=cf_paired, pair_type=pair_type)
+            _save_figure(fig_dist,
                          _figure_path(dsfile,
-                                      '{}_pairs_recon'.format(pair_type)),
+                                      '{}_pair_distances'.format(pair_type)),
                          logger)
-    except Exception as e:
-        logger.warning('Sample reconstruction failed: %s', e)
+        except Exception as e:
+            logger.warning('plot_pair_distances failed: %s', e)
+
+    # -- sample reconstruction plot ------------------------------------
+    if plot:
+        try:
+            i1, i2 = fp.get_pairs(cf_paired, pair_type)
+            if pair_type == 'omega':
+                sx, sy = fp.locate_omega_pairs(cf_paired, (i1, i2), ds=ds, y0=ds.y0)
+            else:
+                sx, sy = fp.locate_eta_pairs(cf_paired, (i1, i2), ds=ds, y0=ds.y0)
+
+            valid = np.isfinite(sx) & np.isfinite(sy)
+            if valid.sum() > 0 and hasattr(ds, 'ybinedges'):
+                import matplotlib.pyplot as plt
+                hist = np.histogram2d(sx[valid] + ds.y0,
+                                      sy[valid] + ds.y0,
+                                      bins=ds.ybinedges)[0]
+                fig_rec, ax = plt.subplots(1, 1, layout='constrained',
+                                           figsize=(6, 6))
+                im = ax.pcolormesh(ds.ybinedges, ds.ybinedges, hist,
+                                   vmax=np.percentile(hist.ravel(), 99), rasterized=True)
+                ax.set_aspect(1)
+                ax.set(title='{} pairs - sample reconstruction'.format(pair_type),
+                       ylabel='Sample Y axis',
+                       xlabel='Sample X axis')
+                plt.colorbar(im, ax=ax, orientation='vertical',
+                             pad=0.04, shrink=0.7)
+                _save_figure(fig_rec,
+                             _figure_path(dsfile,
+                                          '{}_pairs_recon'.format(pair_type)),
+                             logger)
+        except Exception as e:
+            logger.warning('Sample reconstruction failed: %s', e)
  
     return cf_paired
  
@@ -442,7 +459,7 @@ def match_friedel_pairs_pipeline(dsfile,
     pairing_options_file : str  - path to JSON options file (optional)
     use2Dpeaks           : bool - if True use 2D peaks, else 4D peaks
     """
-    t0 = time.perf_counter()
+    t0 = _perf_counter()
  
     # -- log file next to dataset -------------------------------------- 
     log_path = _log_path(dsfile)
@@ -531,7 +548,7 @@ def match_friedel_pairs_pipeline(dsfile,
             logger.error('Failed to save columnfile: %s', e)
             raise
  
-        elapsed = time.perf_counter() - t0
+        elapsed = _perf_counter() - t0
         logger.info('Pipeline completed in %.1f s', elapsed)
         print('Done in {:.1f} s - log: {}'.format(elapsed, log_path))
 
