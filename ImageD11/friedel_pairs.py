@@ -41,6 +41,12 @@ import os, sys, time
 import logging
 import numpy as np
 import multiprocessing as mp
+
+# time.perf_counter is Python 3.3+; fall back to time.time on Python 2.7.
+try:
+    _perf_counter = time.perf_counter
+except AttributeError:
+    _perf_counter = time.time
 from collections import namedtuple
 from contextlib import contextmanager
 from tqdm import tqdm
@@ -385,7 +391,7 @@ class PeakSubsets:
     def _get_eta_bins(self, n_bins):
         """ compute eta bins """
         emin, emax = -180, 180
-        eta_step = (emax - emin) / n_bins
+        eta_step = (emax - emin) / float(n_bins)
         self.ebinedges = np.linspace(emin, emax, n_bins+1)
         self.ebincens  = np.linspace(emin + eta_step / 2, emax - eta_step / 2, len(self.ebinedges) - 1)
     
@@ -1893,7 +1899,7 @@ def _run_pairing(cf, idx1, idx2,
             print('{}'.format('-' * 50))
 
     def _progress_bar(n_paired, n_total, width=30):
-        frac   = n_paired / n_total if n_total > 0 else 0
+        frac   = float(n_paired) / n_total if n_total > 0 else 0
         filled = int(width * frac)
         bar    = '#' * filled + '.' * (width - filled)
         return '  [{bar}] {pct:.1f}%  ({n}/{tot})'.format(
@@ -1917,13 +1923,13 @@ def _run_pairing(cf, idx1, idx2,
     # -- 2. Iterative matching -----------------------------------------
     _section('ITERATIVE PAIR MATCHING [{} steps]'.format(len(dist_steps)) )
 
-    t_start  = time.perf_counter()
+    t_start  = _perf_counter()
     timed_out = False
 
     for i, dist_cutoff in enumerate(dist_steps):
 
          # -- timeout check ---------------
-        elapsed = time.perf_counter() - t_start
+        elapsed = _perf_counter() - t_start
         if elapsed > t_max:
             timed_out = True
             logger.warning(
