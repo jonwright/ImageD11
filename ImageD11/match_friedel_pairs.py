@@ -58,16 +58,14 @@ except AttributeError:
 import numpy as np
 
 
-# Python path: needs to be sorted out. I copied the stuff we put at the beginning of notebooks to load ImageD11 from local user folder (cloned from github), but in production this should not be here
 # python environment stuff
-IMAGED11_PATH = '/home/esrf/jean1994b/ImageD11_jbjacob'  # None means do not use git, otherwise enter the name of the folder to use for the git checkout "ImageD11" or "ImageD11_version_xx", etc
-CHECKOUT_PATH = 'ImageD11'  # the name of the git checkout folder within path. None means guess
+IMAGED11_PATH = None  # means do not use git, otherwise "ImageD11" or "ImageD11_version_xx", etc
+CHECKOUT_PATH = None  # None means guess, or you can specify a folder for the checkout
 
 if IMAGED11_PATH is not None:
-    if '/data/id11/nanoscope' not in sys.path:
-        sys.path.append('/data/id11/nanoscope')
-    import install_ImageD11_from_git
-    PYTHONPATH = install_ImageD11_from_git.setup_ImageD11_from_git(IMAGED11_PATH,CHECKOUT_PATH)
+    _ns = {}
+    exec(open('/data/id11/nanoscope/install_ImageD11_from_git.py').read(), _ns)
+    PYTHONPATH = _ns['setup_ImageD11_from_git'](CHECKOUT_PATH, IMAGED11_PATH)
 
 import ImageD11.sinograms.dataset
 import ImageD11.columnfile
