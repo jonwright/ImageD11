@@ -1102,7 +1102,7 @@ try:
         files """
 
         def __init__(self, titles):
-            super().__init__(self, filename=None, new=True)
+            super(NewPandasColumnfile, self).__init__(filename=None, new=True)
             self._df.columns = titles
 
 except ImportError:

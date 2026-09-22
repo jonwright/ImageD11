@@ -1,3 +1,4 @@
+# coding: utf-8
 # friedel_pairs.py
 # Match Friedel reflection pairs in a columnfile
 #
@@ -43,7 +44,6 @@ import numpy as np
 import multiprocessing as mp
 from collections import namedtuple
 from contextlib import contextmanager
-from enum import Enum
 from tqdm import tqdm
 
 import scipy.spatial
@@ -60,7 +60,7 @@ os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
 # ──────────────────────────────────────────────────────────────────────────────────────────
 # PairMode: the three Friedel pair relationships
 # ──────────────────────────────────────────────────────────────────────────────────────────
-class PairMode(str, Enum):
+class PairMode(object):
     """
     The three pairwise relationships between the peaks of a scattering vector (g, -g)
     appearing in the 4 detector quadrants. See module header for the quadrant diagram.
@@ -69,13 +69,21 @@ class PairMode(str, Enum):
         HORIZONTAL  : g ->  g, y -> -y, eta -> -eta      (Ewald sphere entry/exit at +-y)
         VERTICAL    : g -> -g, y ->  y, eta -> 180-eta   (omega pair, omega -> omega+180)
         DIAGONAL    : g -> -g, y -> -y, eta -> 180+eta   (Friedel point inversion)
+
+    String-valued singleton members.  Deliberately not a stdlib ``enum`` (absent on
+    Python 2.7 without ``enum34``); callers use ``mode.value`` / ``str(mode)``.
     """
-    HORIZONTAL = 'horizontal_pair'
-    VERTICAL   = 'vertical_pair'
-    DIAGONAL   = 'diagonal_pair'
+    def __init__(self, value):
+        self.value = value
 
     def __str__(self):
         return self.value
+
+
+# singleton members (assigned after the class so they are PairMode instances)
+PairMode.HORIZONTAL = PairMode('horizontal_pair')
+PairMode.VERTICAL   = PairMode('vertical_pair')
+PairMode.DIAGONAL   = PairMode('diagonal_pair')
 
 
 # legacy (paired-type) names mapped to the canonical mode strings
@@ -2553,7 +2561,7 @@ def match_box_beam(cf_in, womega=1.0, weta=1.0, wtth=1.5, wI=0.5,
 # ─────────────────────────────────────────────────────────────────────────────
 #  Robust y0 fitting from Friedel pair positions
 # ─────────────────────────────────────────────────────────────────────────────
-def fit_y0(cf, pairs, y0s, npks=100_000, nbx=256, nby=256,
+def fit_y0(cf, pairs, y0s, npks=100000, nbx=256, nby=256,
            fit_window=15, seed=0, doplot=False):
     """
     Find the beam-centre offset y0 that best focuses the pair reconstruction,
@@ -2585,7 +2593,7 @@ def fit_y0(cf, pairs, y0s, npks=100_000, nbx=256, nby=256,
     n_y0 = len(y0s)
 
     # subsample the pairs
-    rng = np.random.default_rng(seed)
+    rng = np.random.RandomState(seed)
     N = s0.shape[1]
     n_sub = min(N, npks)
     sub = rng.choice(N, n_sub, replace=False) if N > n_sub else slice(None)

@@ -1,3 +1,4 @@
+# coding: utf-8
 # tests for the Friedel pair module (ImageD11.friedel_pairs)
 """
 Covers:
@@ -71,7 +72,7 @@ def _gen_synthetic(mode, n=12, seed=7):
     partner satisfies the given Friedel relationship (plus a small noise so the
     KDTree search does not see exactly-degenerate residuals).
     """
-    rng = np.random.default_rng(seed)
+    rng = np.random.RandomState(seed)
     g_ref = rng.normal(size=(n, 3))
     g_ref /= np.linalg.norm(g_ref, axis=1, keepdims=True)
     e_ref = rng.uniform(30, 150, size=n)
@@ -261,7 +262,7 @@ def test_match_friedel_pairs_legacy_names_still_work():
 # ─────────────────────────────────────────────────────────────────────────────
 def test_find_pairs_diagonal():
     n = 10
-    rng = np.random.default_rng(5)
+    rng = np.random.RandomState(5)
     g = rng.normal(size=(n, 3)); g /= np.linalg.norm(g, axis=1, keepdims=True)
     e = rng.uniform(30, 150, n)
     g_part = -g
@@ -283,7 +284,7 @@ def test_find_pairs_diagonal():
 
 def test_locate_pairs_and_affine_equivalent_to_eta_pairs():
     n = 10
-    rng = np.random.default_rng(5)
+    rng = np.random.RandomState(5)
     g = rng.normal(size=(n, 3)); g /= np.linalg.norm(g, axis=1, keepdims=True)
     e = rng.uniform(30, 150, n)
     om = rng.uniform(20, 160, n)
@@ -313,7 +314,7 @@ def test_locate_pairs_and_affine_equivalent_to_eta_pairs():
 
 def test_fit_y0():
     n = 60
-    rng = np.random.default_rng(2)
+    rng = np.random.RandomState(2)
     g = rng.normal(size=(n, 3)); g /= np.linalg.norm(g, axis=1, keepdims=True)
     e = rng.uniform(30, 150, n)
     om = rng.uniform(20, 160, n)
@@ -335,7 +336,7 @@ def test_fit_y0():
 
 def test_match_box_beam():
     n = 6
-    rng = np.random.default_rng(11)
+    rng = np.random.RandomState(11)
     om = rng.uniform(10, 170, n); e = rng.uniform(30, 150, n)
     tth = np.full(n, 10.0); I = rng.uniform(50, 200, n)
     xl = rng.uniform(-1, 1, n); yl = rng.uniform(-1, 1, n); zl = rng.uniform(-1, 1, n)
@@ -382,10 +383,11 @@ def test_legacy_alias_survives_filter_roundtrip(tmp_path):
 # self-contained Si_cube cf_4d fixture
 # ─────────────────────────────────────────────────────────────────────────────
 import os
-from pathlib import Path
 
-FIXTURE = Path(__file__).parent.parent / "data" / "Si_cube_friedel_test.cf_4d.h5"
-FIXTURE_UBI = Path(__file__).parent.parent / "data" / "Si_cube_friedel_test.ubi"
+FIXTURE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data",
+                                       "Si_cube_friedel_test.cf_4d.h5"))
+FIXTURE_UBI = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data",
+                                           "Si_cube_friedel_test.ubi"))
 SI_A = 5.43094  # silicon cell length (Angstrom)
 
 
@@ -407,11 +409,11 @@ def _ring_residual(gg, rings):
     return abs(rings[j] - gg) / gg * 100.0
 
 
-@pytest.mark.skipif(not FIXTURE.exists(), reason="Si_cube cf_4d fixture not present")
+@pytest.mark.skipif(not os.path.exists(FIXTURE), reason="Si_cube cf_4d fixture not present")
 def test_si_cube_cf4d_fixture_geometry_and_friedel_pairs():
     """The self-contained cf_4d round-trips its geometry and yields Friedel pairs
     that sit on the allowed silicon reflections."""
-    c = columnfile.columnfile(str(FIXTURE))
+    c = columnfile.columnfile(FIXTURE)
     # geometry + cell restored from the HDF5 attributes
     assert abs(c.parameters.get('wavelength') - 0.1897) < 1e-3
     assert abs(c.parameters.get('distance') - 151015.75) < 1.0
@@ -438,8 +440,8 @@ def test_si_cube_cf4d_fixture_geometry_and_friedel_pairs():
 
     # cross-check against the indexed grain orientation: pairs are real Si
     # reflections (integer hkl under h = UB.g) that flip hkl -> -h,-k,-l.
-    if FIXTURE_UBI.exists():
-        UB = np.loadtxt(str(FIXTURE_UBI)).reshape(3, 3)
+    if os.path.exists(FIXTURE_UBI):
+        UB = np.loadtxt(FIXTURE_UBI).reshape(3, 3)
         gmat = np.column_stack((c.gx, c.gy, c.gz))     # (n,3)
         hkl = np.dot(UB, gmat.T)                       # (3,n); hkl = UB.g
         ni = np.abs(hkl - np.round(hkl)).max(axis=0)
