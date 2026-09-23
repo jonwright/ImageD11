@@ -114,3 +114,27 @@ test/c2ImageD11_migration/c2_git/
 /_cImageD11module.c
 /_cImageD11-f2pywrappers.f
 /_cImageD11-f2pywrappers2.f90
+
+# large untracked real f2scan master files and test output
+test/f2scans/
+test/*.new
+test/*.out
+test/*.db
+test/*.flt
+testcolfile.hdf
+test.col
+
+# scratch files written by the test suite into the repo root and test/
+1.ubi.*
+2.ubi.*
+3.ubi.*
+test/1.ubi.*
+test/2.ubi.*
+test/3.ubi.*
+*.fftnew
+oldpars.par
+test/oldpars.par
+testgeom.flt
+eu.patterson_pks
+test/eu.patterson_pks
+test/test_fetch_data/

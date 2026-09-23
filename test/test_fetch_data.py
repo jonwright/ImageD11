@@ -87,7 +87,9 @@ class TestGetDataset(unittest.TestCase):
         self.valid_base_url = fetch_data.dataset_base_urls[self.valid_dsetname]
         self.valid_folder = './test_fetch_data'
         if os.path.exists(self.valid_folder):
-            raise IOError('Intended download destination already exists! Aborting test...')
+            # we keep the download on purpose (see tearDown), so re-runs reuse
+            # the files already present rather than redownloading or crashing
+            self.skipTest('test_fetch_data already downloaded')
         self.invalid_folder = './djasqowdonqwfioqfioqnwd'  # unlikely to collide?
         if os.path.exists(self.invalid_folder):
             raise IOError('Intended not-working path actually exists! Aborting test...')
@@ -193,5 +195,6 @@ class TestGetDataset(unittest.TestCase):
         self.assertEqual(len(ds_returned.scans), 41)
 
     def tearDown(self):
-        if os.path.exists(self.valid_folder):
-            shutil.rmtree(self.valid_folder)
+        # intentionally keep the downloaded dataset (sparse file, par, e2dx/e2dy)
+        # so it can be reused by other (non-CI) runs
+        pass

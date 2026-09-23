@@ -89,13 +89,16 @@ class shared_numpy_array:
         else:
             self.nbytes = np.prod(shape) * np.dtype(dtype).itemsize
 
+        # shared memory must be at least 1 byte, even for a 0-element array
+        # (an empty rc matrix, e.g. a scan with no overlapping peaks)
+        size = max(int(self.nbytes), 1)
         if shmname is None:
-            self.shm = shared_memory.SharedMemory(create=True, size=int(self.nbytes))
+            self.shm = shared_memory.SharedMemory(create=True, size=size)
             self.creator = True
         else:
             self.shm = shared_memory.SharedMemory(create=False, name=shmname)
             self.creator = False
-        self.array = np.ndarray(shape, dtype, buffer=self.shm.buf)
+        self.array = np.ndarray(shape, dtype, buffer=self.shm.buf[:size])
         if ary is not None:
             self.array[:] = ary
         if fill is not None:
@@ -128,53 +131,118 @@ class tictoc:
         self.t = default_timer()
 
 
-def pairrow(s, row):
+def pairrow(s, row, ds=None, masked=None):
     """
-    s = SparseScan
+    s = SparseScan (one row of the sinogram grid)
+    row = sinogram row index
+    masked = 0-based local frame indices to skip (they make no pairs)
+
+    Frames within a row sit at grid columns 0..s.shape[0]-1, in acquisition
+    order (for a continuous f2scan turn that is also omega order). Pairs are
+    built between adjacent columns, skipping empty frames. When the scan wraps
+    (more than one turn), the last column of a full-length row also pairs with
+    the first, closing the omega seam.
 
     returns SparseScan which adds a dictionary of pairs:
          sourceFrame    destFrame
         [ idty, iomega, idty, iomega ] : nedge, array( (nedge, 3) )
-                                                     (src, dest, npixels)
+                                                 (src, dest, npixels)
     """
-    s.omegaorder = np.argsort(s.motors["omega"])  # not mod 360 here
-    s.sinorow = row
+    s1 = ds.shape[1] if ds is not None else s.shape[0]
+    wraps = bool(getattr(ds, "omega_wraps", False)) if ds is not None else False
     olap = ImageD11.sparseframe.overlaps_linear(s.nnz.max() + 1)
     pairs = {}
-    for i in range(1, len(s.omegaorder)):
-        if (s.nnz[s.omegaorder[i]] == 0) or (s.nnz[s.omegaorder[i - 1]] == 0):
-            continue
-        f0 = s.getframe(s.omegaorder[i - 1])
-        f1 = s.getframe(s.omegaorder[i])
+    n = s.shape[0]
+    masked = set(masked) if masked is not None else set()
+
+    def pair(i, j):
+        if (s.nnz[i] == 0) or (s.nnz[j] == 0):
+            return
+        f0 = s.getframe(i)
+        f1 = s.getframe(j)
         ans = olap(
             f0.row,
             f0.col,
             f0.pixels["labels"],
-            s.nlabels[s.omegaorder[i - 1]],
+            s.nlabels[i],
             f1.row,
             f1.col,
             f1.pixels["labels"],
-            s.nlabels[s.omegaorder[i]],
+            s.nlabels[j],
         )
-        pairs[row, s.omegaorder[i - 1], row, s.omegaorder[i]] = ans
+        pairs[row, i, row, j] = ans
+
+    for i in range(n - 1):
+        if i not in masked and (i + 1) not in masked:
+            pair(i, i + 1)
+    if wraps and s1 - 1 < n and (s1 - 1) not in masked and 0 not in masked:
+        pair(s1 - 1, 0)
     return pairs
 
 
-def pairscans(s1, s2, omegatol=0.051):
+def pairscans(s1, s2, row, ds=None, omegatol=None, connectivity=4,
+              masked1=None, masked2=None):
+    """Pair the frames of adjacent grid rows.
+
+    s1 = SparseScan for row `row`
+    s2 = SparseScan for row `row - 1`
+    row = index of s1 in the dataset grid
+    ds = the DataSet, giving the grid (cell_frame, shape, omega_wraps) and the
+        ostep used to derive the default omegatol.
+    omegatol = maximum circular omega difference for a legit pair. Defaults to
+        half an omega step (ds.ostep/2), which is right for a scan whose step
+        does not equal the hardcoded 0.051 (Cu: 0.22).
+    connectivity = grid connectivity used to find the candidate cell in the
+        adjacent row (4 for a regular grid, 8 to reach the diagonal that is the
+        true neighbour on an offset f2scan).
+    masked1 / masked2 = 0-based local frame indices to skip in s1 / s2.
+
+    For each frame of s1, the neighbouring cell(s) in s2 are found by index
+    (DataSet.grid_neighbours); among them the one whose omega is nearest is
+    chosen and paired if it is within omegatol.
+
+    returns a dict of pairs:
+        (row1, frame1, row2, frame2) -> (nedge, array((nedge,3)))
+    """
+    s1cols = ds.shape[1] if ds is not None else s1.shape[0]
+    if omegatol is None:
+        omegatol = (ds.ostep / 2.0) if (ds is not None and getattr(ds, "ostep", 0)) else 0.051
     olap = ImageD11.sparseframe.overlaps_linear(max(s1.nnz.max(), s2.nnz.max()) + 1)
-    assert len(s1.nnz) == len(s2.nnz)
     pairs = {}
     omega_1 = s1.motors["omega"] % 360
     omega_2 = s2.motors["omega"] % 360
+    masked1 = set(masked1) if masked1 is not None else set()
+    masked2 = set(masked2) if masked2 is not None else set()
+
+    def circdiff(a, b):
+        return abs(((a - b + 180.0) % 360.0) - 180.0)
+
     for i in range(len(s1.nnz)):
-        # check omega angles match
-        o1 = omega_1[i]
-        j = np.argmin(abs(omega_2 - o1))
-        o2 = omega_2[j]
-        if abs(o1 - o2) > omegatol:
-            # this frame has no neighbor
+        if s1.nnz[i] == 0 or i in masked1:
             continue
-        if (s1.nnz[i] == 0) or (s2.nnz[j] == 0):
+        o1 = omega_1[i]
+        # candidate cells in the adjacent (previous) row, found by index
+        best = None
+        if ds is not None:
+            k = row * s1cols + i
+            for ck in ds.grid_neighbours(k, connectivity):
+                cr, cc = divmod(int(ck), s1cols)
+                if cr != (row - 1):
+                    continue
+                if cc >= len(s2.nnz) or s2.nnz[cc] == 0 or cc in masked2:
+                    continue
+                d = circdiff(omega_2[cc], o1)
+                if best is None or d < best[0]:
+                    best = (d, cc)
+        else:
+            # no dataset: same-column index in the next row, as before
+            if i < len(s2.nnz) and s2.nnz[i] > 0 and i not in masked2:
+                best = (circdiff(omega_2[i], o1), i)
+        if best is None:
+            continue
+        d, j = best
+        if d > omegatol:
+            # this frame has no neighbour
             continue
         f0 = s1.getframe(i)
         f1 = s2.getframe(j)
@@ -192,11 +260,16 @@ def pairscans(s1, s2, omegatol=0.051):
     return pairs
 
 
-def props(scan, i, algorithm="lmlabel", wtmax=None):
+def props(scan, i, algorithm="lmlabel", wtmax=None, ds=None, connectivity=4,
+          masked=None):
     """
     scan = sparseframe.SparseScan object
     i = sinogram row id : used for tagging pairs
     algorithm = 'lmlabel' | 'cplabel'
+    ds = the DataSet, giving the grid stride (shape[1]) and the neighbour rule
+    connectivity = grid connectivity for the inter-row pairing (see DataSet)
+    masked = 0-based local frame indices to skip entirely; they produce no peaks
+        and no pairs (the dataset's masked_frames, translated to local indices).
 
     Labels the peaks with lmlabel
     Assumes a regular scan for labelling frames
@@ -204,11 +277,17 @@ def props(scan, i, algorithm="lmlabel", wtmax=None):
     """
     scan.sinorow = i
     getattr(scan, algorithm)(countall=False)  # labels all the pixels in the scan.
-    npks = scan.total_labels
+    if masked is not None and len(masked):
+        masked = set(masked)
+        keep = [j for j in range(scan.shape[0]) if j not in masked]
+    else:
+        keep = range(scan.shape[0])
+    npks = sum(scan.nlabels[j] for j in keep)
     r = np.empty((5, npks), np.int64)
     s = 0
-    j0 = i * scan.shape[0]
-    for j in range(scan.shape[0]):
+    s1 = ds.shape[1] if ds is not None else scan.shape[0]
+    j0 = i * s1
+    for j in keep:
         if scan.nnz[j] == 0:
             continue
         f0 = scan.getframe(j)
@@ -241,7 +320,7 @@ def props(scan, i, algorithm="lmlabel", wtmax=None):
         r[4, s:e] = j + j0
         s = e
     # Matrix entries for this scan with itself:
-    pairs = pairrow(scan, i)
+    pairs = pairrow(scan, i, ds=ds, masked=masked)
     return r, pairs
 
 
@@ -351,6 +430,7 @@ class pks_table:
         glabel=None,
         nlabel=0,
         use_shm=False,
+        masked_frames=None,
     ):
         """
         Cases:
@@ -367,6 +447,7 @@ class pks_table:
         self.nlabel = nlabel
         self.use_shm = use_shm
         self.shared = {}
+        self.masked_frames = masked_frames
         # otherwise create
         if self.npk is not None:
             self.create(self.npk)
@@ -480,6 +561,11 @@ class pks_table:
                 ds.attrs[
                     "description"
                 ] = "row/col array for sparse connected pixels COO matrix"
+            if getattr(self, "masked_frames", None) is not None:
+                mf = np.asarray(self.masked_frames, np.int64)
+                mds = grp.require_dataset(
+                    name="masked_frames", shape=mf.shape, dtype=mf.dtype)
+                mds[:] = mf
 
     @classmethod
     def fromSHM(cls, dct):
@@ -507,7 +593,9 @@ class pks_table:
             # rc?
             npk = grp["npk"][:]
             nlabel = grp.attrs["nlabel"]
-        obj = cls(ipk=ipk, pk_props=pk_props, glabel=glabel, nlabel=nlabel)
+            masked_frames = grp["masked_frames"][:] if "masked_frames" in grp else None
+        obj = cls(ipk=ipk, pk_props=pk_props, glabel=glabel, nlabel=nlabel,
+                  masked_frames=masked_frames)
         obj.npk = npk  # this is ugly. Sending as arg causes allocate.
         return obj
 
@@ -774,7 +862,36 @@ def find_ND_labels(i, j, npks, verbose=1):
     return n, labels
 
 
-def pks_table_from_scan(sparsefilename, ds, row, algorithm='lmlabel', wtmax=None):
+def slice_bounds(scan):
+    """(lo, hi) raw frame range of a "1.1::[a:b]" scan; hi None for a whole scan."""
+    if scan.find("::") > -1:
+        snum, slc = scan.split("::")
+        lo, hi = [int(v) for v in slc[1:-1].split(":")]
+        return lo, hi
+    return 0, None
+
+
+def row_frame_mask(ds, row):
+    """Local (slice-relative) masked frame indices for grid row `row`.
+
+    The dataset's masked_frames are bliss/master frame numbers; a SparseScan
+    addresses its frames 0..n-1 relative to the slice, so translate. Returns
+    None when nothing is masked.
+    """
+    mf = getattr(ds, "masked_frames", None)
+    if mf is None or len(mf) == 0:
+        return None
+    lo, hi = slice_bounds(ds.scans[row])
+    mf = np.asarray(mf, int)
+    if hi is None:
+        loc = mf[mf >= lo] - lo
+    else:
+        loc = mf[(mf >= lo) & (mf < hi)] - lo
+    return loc if loc.size else None
+
+
+def pks_table_from_scan(sparsefilename, ds, row, algorithm='lmlabel', wtmax=None,
+                        connectivity=4):
     """
     Labels one rotation scan to a peaks table
 
@@ -788,8 +905,14 @@ def pks_table_from_scan(sparsefilename, ds, row, algorithm='lmlabel', wtmax=None
     This is probably not threadsafe
     """
     sps = ImageD11.sparseframe.SparseScan(sparsefilename, ds.scans[row])
-    sps.motors["omega"] = ds.omega[row]
-    peaks, pairs = ImageD11.sinograms.properties.props(sps, row, algorithm=algorithm, wtmax=wtmax)
+    lo, hi = slice_bounds(ds.scans[row])
+    if hi is None:
+        sps.motors["omega"] = ds.omega_raw[lo:]
+    else:
+        sps.motors["omega"] = ds.omega_raw[lo:hi]
+    peaks, pairs = ImageD11.sinograms.properties.props(
+        sps, row, algorithm=algorithm, wtmax=wtmax, ds=ds, connectivity=connectivity,
+        masked=row_frame_mask(ds, row))
     # which frame/peak is which in the peaks array
     # For the 3D merging
     n1 = sum(pairs[k][0] for k in pairs)  # how many overlaps were found:
@@ -820,6 +943,7 @@ def pks_table_from_scan(sparsefilename, ds, row, algorithm='lmlabel', wtmax=None
         rc[2, s:e] = ijn[:, 2]  # num pixels
         s = e
     uni = pkst.find_uniq()
+    pkst.masked_frames = getattr(ds, "masked_frames", None)
     """
     if 0:  # future TODO : scoring overlaps better.
         ks = list(pairs.keys())
@@ -861,14 +985,23 @@ def process(qin, qshm, qout, hname, dsfilename, options):
     # This is the 1D scan within the same row
     for i in range(start, end + 1):
         scan = ImageD11.sparseframe.SparseScan(hname, scans[i])
-        scan.motors["omega"] = dset.omega[i]
+        lo, hi = slice_bounds(scans[i])
+        if hi is None:
+            scan.motors["omega"] = dset.omega_raw[lo:]
+        else:
+            scan.motors["omega"] = dset.omega_raw[lo:hi]
         mypks[i], pii[i] = props(
-            scan, i, algorithm=options["algorithm"], wtmax=options["wtmax"]
+            scan, i, algorithm=options["algorithm"], wtmax=options["wtmax"],
+            ds=dset, connectivity=options["connectivity"],
+            masked=row_frame_mask(dset, i),
         )
         pkid[i] = ImageD11.sparseframe.nnz_to_pointer( scan.nlabels )
         n1 = sum(pii[i][k][0] for k in pii[i])
         if i > start:
-            pij[i] = pairscans(scan, prev)
+            pij[i] = pairscans(scan, prev, row=i, ds=dset,
+                               connectivity=options["connectivity"],
+                               masked1=row_frame_mask(dset, i),
+                               masked2=row_frame_mask(dset, i - 1))
             n2 = sum(pij[i][k][0] for k in pij[i])
         # number of pair overlaps required for the big matrix
         qout.put((i, len(mypks[i][0]), n1, n2))
@@ -975,6 +1108,7 @@ default_options = {
     "wtmax": None,  # value to replace saturated pixels
     "save_overlaps": False,
     "nproc": None,
+    "connectivity": 4,  # grid neighbours rule for pairing across rows
 }
 
 
@@ -992,6 +1126,7 @@ def main(dsfilename, sparsefile=None, pksfile=None, options={}):
         "wtmax": None,  # value to replace saturated pixels
         "save_overlaps": False,  # for debug
         "nproc": None,  # None == guess
+        "connectivity": 4,  # grid neighbours rule for pairing across rows
     }
     for k in options:
         if k in default_options:

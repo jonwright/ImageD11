@@ -35,6 +35,9 @@ def guess_chunks(name, shape):
         return (shape[0], 1)
     if name == "dty":
         return (1, shape[1])
+    if name in ("omega_raw", "dty_raw", "monitor_raw", "nnz_raw"):
+        # long 1-D master-length arrays: chunk along the single axis
+        return (max(1, shape[0] // 1000),)
     return shape
 
 
@@ -79,6 +82,124 @@ def bin_phase(values, step):
     r = (np.asarray(values).ravel() % step) * (2 * np.pi / step)
     phase = np.arctan2(np.sin(r).mean(), np.cos(r).mean()) * step / (2 * np.pi)
     return phase % step
+
+
+def cell_frame_from_raw(omega_seg, dty_seg, step, base=0):
+    """Grid occupied by one continuous f2scan.
+
+    omega_seg / dty_seg: the absolute (or mod-360) motor positions of one
+        continuous rotation, in acquisition order.
+    step: the setpoint step in deg (instrument/fscan_parameters/step_size).
+    base: the offset of this scan's first frame in the dataset's raw arrays.
+
+    Returns (cell_frame, unplaced, n_turns, s1):
+
+        cell_frame: (n_turns, s1) int array, value = base + index of the raw
+            frame in the cell, or -1 where the turn is short.
+        unplaced: integer array of the raw indices (within this segment) of
+            frames an over-long turn cannot hold. These are real data that the
+            grid drops; they stay in omega_raw/dty_raw.
+        n_turns: number of rows (distinct turns).
+        s1: columns, round(360 / step).
+
+    A turn is floor(unwrapped_omega / 360). A frame whose position within its
+    turn is >= s1 belongs to an over-long turn and is dropped; a short turn
+    leaves trailing -1 cells. See the plan's section 1.
+    """
+    omega_seg = np.asarray(omega_seg, float).ravel()
+    # unwrap to a continuous angle: mod-360 positions come back continuous,
+    # absolute positions are untouched by unwrap (no 180-deg jumps).
+    unwrapped = np.unwrap(omega_seg * np.pi / 180.0) * 180.0 / np.pi
+    turn = np.floor(unwrapped / 360.0).astype(np.int64)
+    if turn.size:
+        turn = turn - turn.min()  # a negative-omega scan starts at turn 0
+    s1 = int(np.round(360.0 / step))
+    n_turns = int(turn.max()) + 1 if turn.size else 0
+    cell_frame = np.full((n_turns, s1), -1, np.int64)
+    # position within a turn: frames are contiguous and in acquisition order,
+    # so it is the offset from the first frame of that turn.
+    # turn is monotonic non-decreasing (continuous rotation), so the first frame
+    # of each turn is found by a single diff, not a per-turn search.
+    starts = np.full(n_turns, -1, np.int64)
+    if turn.size:
+        starts[0] = 0
+        nxt = np.flatnonzero(np.diff(turn)) + 1  # first frame of each new turn
+        starts[turn[nxt]] = nxt
+    pos = np.arange(len(omega_seg)) - starts[turn]
+    frames = np.arange(len(omega_seg))
+    valid = pos < s1
+    cell_frame[turn[valid], pos[valid]] = base + frames[valid]
+    unplaced = frames[~valid]
+    return cell_frame, unplaced, n_turns, s1
+
+
+def grid_from_cells(flat, cell_frame):
+    """Spread a master-length array onto the grid, filling empty cells.
+
+    flat: full-length array in raw frame order (e.g. omega_raw, dty_raw, nnz).
+    cell_frame: (n_turns, s1) int, value = raw frame index or -1.
+
+    Real cells take the raw value. Empty cells are filled from the nearest real
+    value in the same column (interpolated over rows), so statistics like
+    omega.min()/dty.max() stay sane. A fully empty column copies the previous
+    filled column; the first fully empty column is filled with the row pattern
+    from the nearest real column.
+    """
+    cell_frame = np.asarray(cell_frame)
+    s0, s1 = cell_frame.shape
+    grid = np.empty((s0, s1), dtype=np.asarray(flat).dtype)
+    real = cell_frame >= 0
+    grid[real] = flat[cell_frame[real]]
+    # fill holes column by column, only where there is a hole (rare on a
+    # regular f2scan), so we do not scan every column.
+    holes = ~real
+    cols_with_holes = np.nonzero(holes.any(axis=0))[0]
+    for j in cols_with_holes:
+        rows = np.nonzero(real[:, j])[0]
+        if len(rows) == 0:
+            # fully empty column: handled after the loop
+            continue
+        vals = grid[rows, j]
+        hole = np.nonzero(holes[:, j])[0]
+        if len(rows) == 1:
+            grid[hole, j] = vals[0]
+        else:
+            grid[hole, j] = np.interp(hole, rows, vals)
+    # fully empty columns
+    empty_cols = np.nonzero(~real.any(axis=0))[0]
+    for j in empty_cols:
+        src = j - 1
+        while src >= 0 and (src in empty_cols):
+            src -= 1
+        if src >= 0:
+            grid[:, j] = grid[:, src]
+        else:
+            # no previous filled column : pick any row value as a stand-in
+            k = np.nonzero(real.any(axis=1))[0]
+            if k.size:
+                grid[:, j] = grid[k[0], :].mean()
+            else:
+                grid[:, j] = 0
+    return grid
+
+
+def row_mean_grid(flat, cell_frame):
+    """The dset.dty grid: each row constant, the mean of the real cells in it.
+
+    A f2scan's dty drifts by about one ystep per turn, so binned by measured
+    dty a turn can straddle two dty rows. For the sinogram we want each row (=
+    one turn = one scan) to sit in a single dty bin, so the row takes the mean
+    of the raw dty over its real cells. This is the "dset.dty =
+    gridded(dty_raw).mean(axis=rotation)" fix.
+    """
+    cell_frame = np.asarray(cell_frame)
+    s0, s1 = cell_frame.shape
+    means = np.empty(s0, dtype=np.asarray(flat).dtype)
+    for r in range(s0):
+        row = cell_frame[r]
+        nz = row[row >= 0]
+        means[r] = flat[nz].mean() if nz.size else 0.0
+    return np.repeat(means, s1).reshape(s0, s1)
 
 
 class DataSet:
@@ -134,7 +255,18 @@ class DataSet:
         "monitor",
         "ybinedges", "ybincens",
         "obinedges", "obincens",
-        "ybin_real_mask"
+        "ybin_real_mask",
+        # full master-length raw motors, kept alongside the grids so nothing
+        # is lost for the frames an irregular scan's grid drops (see the plan)
+        "omega_raw",
+        "dty_raw",
+        "monitor_raw",
+        "nnz_raw",
+        "scan_frame_offset",
+        # int grid of bliss frame index per (turn, position) cell, -1 if empty
+        "cell_frame",
+        # bliss frame numbers the user wants dropped entirely at labelling
+        "masked_frames",
     )
 
     def __init__(
@@ -185,6 +317,13 @@ class DataSet:
         self.omega = None
         self.dty = None
         self.monitor = None
+        self.omega_raw = None
+        self.dty_raw = None
+        self.monitor_raw = None
+        self.nnz_raw = None
+        self.scan_frame_offset = None
+        self.cell_frame = None
+        self.masked_frames = None
         self.monitorname = None
         self.monitor_ref = None
         self.ybinedges = None
@@ -360,6 +499,15 @@ class DataSet:
                 for row in file_nums
             ]
 
+        # the sparse file encodes a regular grid, so the frame map is the
+        # identity: neighbour lookup (grid_neighbours/pairscans) needs it
+        s0, s1 = self.shape
+        self.cell_frame = np.arange(s0 * s1, dtype=np.int64).reshape((s0, s1))
+        self.cell_to_frame = self.cell_frame.ravel()
+        self.frame_to_cell = np.arange(len(self.omega_raw), dtype=np.int64)
+        self.unplaced_frames = np.array([], np.int64)
+        self.scan_frame_offset = np.arange(s0, dtype=np.int64) * s1
+
         self.guessbins()
 
     def import_scans(self, scans=None, hname=None):
@@ -444,6 +592,11 @@ class DataSet:
         you need to import the imagefiles first
         these will be the motor positions to accompany the images
         # could also get these from sparse files if saved
+
+        Builds the per-scan lists self.omega / self.dty (used by guess_shape to
+        make the grids) and the full master-length raw arrays self.omega_raw /
+        self.dty_raw along with scan_frame_offset, so frames the grid drops on
+        an irregular f2scan are not lost.
         """
         # self.guess_motornames()
         self.omega = [
@@ -452,6 +605,8 @@ class DataSet:
         self.dty = [
             None,
         ] * len(self.scans)
+        omega_raw = []
+        dty_raw = []
         with h5py.File(self.masterfile, "r") as hin:
             bad = []
             for i, scan in enumerate(self.scans):
@@ -474,6 +629,10 @@ class DataSet:
                 else:
                     # corrupted MUSST?
                     self.dty[i] = np.full(self.frames_per_scan[i], dty[0])
+                # keep the true motor positions, full master length, so a frame
+                # the grid drops keeps its number and its motors.
+                omega_raw.append(np.asarray(self.omega[i], float).ravel())
+                dty_raw.append(np.asarray(self.dty[i], float).ravel())
         for b in bad:
             dom = [
                 (abs(self.omega[i][0] - self.omega[b])[0], i)  # always length-1 arrays, take first element
@@ -483,17 +642,37 @@ class DataSet:
             # dom is a list of tuples of (first omega value, i)
             # make it into an array
             dom = np.array(dom)
-            
+
             if len(dom) > 0:
                 j = int(dom[np.argmin(dom[:,0])][1])  # get argmin of omega column of dom, go there, then take the corresponding i
                 self.omega[b] = self.omega[j]  # best match
+                # the raw array for this scan now matches the replacement it got
+                omega_raw[b] = np.asarray(self.omega[j], float).ravel()
                 print(
                     "replace bad scan omega", b, self.scans[b], "with", j, self.scans[j]
                 )
-        logging.info("imported omega/dty")
+        self.omega_raw = np.concatenate(omega_raw) if omega_raw else np.array([], float)
+        self.dty_raw = np.concatenate(dty_raw) if dty_raw else np.array([], float)
+        # per-master-scan start offsets into the raw arrays (cumulative). Used
+        # by guess_shape to slice each scan's segment; scan_frame_offset (per
+        # grid row) is built there.
+        self._scan_raw_offset = np.zeros(len(self.scans) + 1, np.int64)
+        np.cumsum([len(o) for o in omega_raw], out=self._scan_raw_offset[1:])
+        logging.info("imported omega/dty (%d raw frames)" % (len(self.omega_raw)))
 
     def guess_shape(self):
-        npts = np.sum( self.frames_per_scan )
+        """Reshape the raw motor arrays into the sinogram grid.
+
+        f2scan is one continuous rotation split into turns of round(360/step)
+        frames, but a turn is not exactly that many frames: an over-long turn
+        drops the frame that has already crossed into the next turn, and a
+        short turn leaves trailing empty cells. cell_frame records which raw
+        frame occupies each cell, so nothing is lost and no frame is double
+        counted. Every other scan type keeps the regular assumption.
+        """
+        npts = np.sum(self.frames_per_scan)
+        cell_blocks = []       # (cell_frame, scan_base) per f2scan master scan
+        f2slice_flag = [False]  # did we see an f2scan?
         if os.path.exists(self.masterfile):
             # strip [i::j] from self.scans if already there:
             seen = set()
@@ -523,43 +702,86 @@ class DataSet:
                         else:
                             rotations += [ scan, ]
                     elif title.split()[0] == "f2scan":
-                        # good luck ? Assuming rotation was the inner loop here:
                         # one continuous rotation split into turns: the merged
-                        # omega must be averaged on the circle.
-                        self.omega_wraps = True
+                        # omega must be averaged on the circle. The turn
+                        # boundaries come from the data, not a fixed count.
+                        f2slice_flag[0] = True
                         step = s["instrument/fscan_parameters/step_size"][()]
-                        s1 = int(np.round(360 / step))
-                        s0 = self.frames_per_scan[i] // s1
-                        # logging.warning("Dataset might need to be reshaped")
-                        if s0 > 1:
-                            file_nums = np.arange( s0 * s1 ).reshape((s0, s1))
-                            if (s1 * s0) != self.frames_per_scan[i]:
-                                logging.warning( 'scan %s problem in guessing f2scan shape s1 = %d s0 = %s nframes = %d'%(
-                                    scan, s1, s0, self.frames_per_scan[i] ) )
-                            rotations += [
-                                "%s::[%d:%d]" % (scan, row[0], row[-1] + 1)
-                                for row in file_nums
-                                ]
-                        else:
-                            rotations += [ scan, ]
+                        # the raw segment for this master scan
+                        idx = self.scans.index(scan)
+                        lo = int(self._scan_raw_offset[idx])
+                        hi = int(self._scan_raw_offset[idx + 1])
+                        cf, unplaced, nturns, s1 = cell_frame_from_raw(
+                            self.omega_raw[lo:hi], self.dty_raw[lo:hi], step,
+                            base=lo)
+                        cell_blocks.append((cf, unplaced, lo))
+                        if nturns > 1:
+                            self.omega_wraps = True
+                        # per-turn slices (variable length): real turn boundaries
+                        for t in range(nturns):
+                            row = cf[t]
+                            nonneg = row[row >= 0]
+                            if nonneg.size:
+                                a = int(nonneg.min()); b = int(nonneg.max()) + 1
+                                rotations.append("%s::[%d:%d]" % (scan, a, b))
+                            else:
+                                rotations.append("%s::[%d:%d]" % (scan, lo, lo))
                     else:
                         s0 = 1
                         s1 = npts
                         rotations.append( scan )
             self.scans = rotations
-        if len(self.scans) >= 1:
-            s0 = len(self.scans)
-            s1 = npts // s0
+        # build the grid
+        if cell_blocks:
+            # f2scan: stack the turn blocks and use the derived (nturns, s1)
+            cell_frame = cell_blocks[0][0]
+            unplaced = cell_blocks[0][1] + cell_blocks[0][2]
+            for cf, up, base in cell_blocks[1:]:
+                cell_frame = np.vstack([cell_frame, cf])
+                unplaced = np.concatenate([unplaced, up + base])
+            s0, s1 = cell_frame.shape
+            self._unplaced_in_scan = unplaced
         else:
-            # no scans
-            s0 = 0
-            s1 = 0
+            if len(self.scans) >= 1:
+                s0 = len(self.scans)
+                s1 = npts // s0
+            else:
+                s0 = 0; s1 = 0
+            cell_frame = np.arange(s0 * s1).reshape((s0, s1))
         self.shape = s0, s1
-        if np.prod(self.shape) != npts:
+        if np.prod(self.shape) != npts and not cell_blocks:
                 print("Warning: irregular scan - might be bugs in here")
                 print(npts, len(self.scans))
-        self.omega = np.array(self.omega).reshape(self.shape)
-        self.dty = np.array(self.dty).reshape(self.shape)
+        self.cell_frame = cell_frame
+        # derive the inverse maps over the full master-length raw range
+        flat = cell_frame.ravel()
+        self.cell_to_frame = flat
+        self.frame_to_cell = np.full(len(self.omega_raw), -1, np.int64)
+        real = flat >= 0
+        self.frame_to_cell[flat[real]] = np.nonzero(real)[0]
+        # raw frame numbers that no cell holds (over-long turn frames)
+        self.unplaced_frames = np.nonzero(self.frame_to_cell < 0)[0]
+        # grids, spread from the raw arrays through cell_frame
+        if cell_blocks:
+            self.omega = grid_from_cells(self.omega_raw, cell_frame)
+            self.dty = row_mean_grid(self.dty_raw, cell_frame)
+        else:
+            self.omega = np.array(self.omega).reshape(self.shape)
+            self.dty = np.array(self.dty).reshape(self.shape)
+        # per-grid-row starting raw frame index
+        if cell_blocks:
+            starts = np.full(s0, -1, np.int64)
+            for r in range(s0):
+                row = cell_frame[r]
+                nonneg = row[row >= 0]
+                starts[r] = int(nonneg.min()) if nonneg.size else 0
+            self.scan_frame_offset = starts
+        else:
+            self.scan_frame_offset = np.arange(s0, dtype=np.int64) * s1
+        if cell_blocks and len(self.unplaced_frames):
+            logging.info(
+                "f2scan: %d frames over-long turns leave unplaced (grid %dx%d)"
+                % (len(self.unplaced_frames), s0, s1))
         logging.info(
                 "sinogram shape = ( %d , %d ) imageshape = ( %d , %d)"
                 % (self.shape[0], self.shape[1], self.imageshape[0], self.imageshape[1])
@@ -732,7 +954,14 @@ class DataSet:
                     mon = hin[scan]["measurement"][name][:]
                 monitor.append(mon)
 
-        return np.concatenate(monitor).reshape(self.shape)
+        # full master-length monitor, so a frame the grid drops keeps it
+        self.monitor_raw = np.concatenate(monitor)
+        # the 2-D grid in cell_frame order, the shape get_monitor_pk2d expects
+        if self.cell_frame is not None:
+            self.monitor = grid_from_cells(self.monitor_raw, self.cell_frame)
+        else:
+            self.monitor = self.monitor_raw.reshape(self.shape)
+        return self.monitor
     
     def reset_peaks_cache(self):
         """
@@ -785,6 +1014,67 @@ class DataSet:
         #pk2d['iy'] = iy  # cache these too ?
         #pk2d['io'] = io
         return monitor[ iy, io ]
+
+    def bliss_frame(self, ir, ic):
+        """The bliss/master frame number of cell (ir, ic), or -1 if empty."""
+        return int(self.cell_frame[ir, ic])
+
+    def grid_from_raw(self, name):
+        """Re-spread a master-length raw array onto the grid via cell_frame.
+
+        name: 'omega', 'dty', 'monitor' or 'nnz' (the grid attribute and the
+        *_raw counterpart). Makes the grid agree with cell_frame after the raw
+        array or cell_frame was edited. This is the helper the plan mentions for
+        a user who edits dty in place, regenerating the grid from the raw data.
+        """
+        raw = getattr(self, name + "_raw")
+        if name == 'nnz':
+            grid = np.zeros(self.shape, raw.dtype)
+            real = self.cell_frame >= 0
+            grid[real] = raw[self.cell_frame[real]]
+        elif name == 'dty':
+            # dty grid is the per-row mean (each turn sits in one dty bin)
+            grid = row_mean_grid(raw, self.cell_frame)
+        else:
+            grid = grid_from_cells(raw, self.cell_frame)
+        return grid
+
+    def grid_neighbours(self, k, connectivity=4):
+        """The grid neighbours of the cell at flat index k.
+
+        Pure index arithmetic on the (nrotations, nframes) grid, no omega/dty
+        comparison: a cell's neighbours are k +/- 1 (same row, omega direction)
+        and k +/- s1 (adjacent row, dty direction). Columns wrap when
+        omega_wraps, so a frame at the omega seam pairs with its neighbour.
+        connectivity: 4 (square), 6 (hexagonal), 8 (square + diagonals). Only
+        cells that exist and hold a frame (cell_frame >= 0) are returned.
+
+        Returns a sorted int array of flat grid indices.
+        """
+        s0, s1 = self.shape
+        r, c = divmod(int(k), s1)
+        if connectivity == 4:
+            offs = ((-1, 0), (1, 0), (0, -1), (0, 1))
+        elif connectivity == 8:
+            offs = ((-1, 0), (1, 0), (0, -1), (0, 1),
+                    (-1, -1), (-1, 1), (1, -1), (1, 1))
+        elif connectivity == 6:
+            # hexagonal : two column neighbours and four diagonal ones
+            offs = ((0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+        else:
+            raise ValueError("connectivity must be 4, 6 or 8")
+        offs = np.asarray(offs, np.int64)
+        rr = r + offs[:, 0]
+        cc = c + offs[:, 1]
+        if self.omega_wraps:
+            cc = cc % s1
+        inrow = (rr >= 0) & (rr < s0)
+        incol = (cc >= 0) & (cc < s1)
+        ok = inrow & incol
+        rr = rr[ok]; cc = cc[ok]
+        idx = rr * s1 + cc
+        real = self.cell_frame.ravel()[idx] >= 0
+        return np.unique(idx[real])
 
     def guess_detector(self):
         """Guess which detector we are using from the masterfile"""
@@ -1029,7 +1319,15 @@ class DataSet:
         for spname in self.sparsefiles:
             with h5py.File(os.path.join(self.analysispath, spname), "r") as hin:
                 nnz.append(hin[self.limapath]["nnz"][:])
-        self.nnz = np.concatenate(nnz).reshape(self.shape).astype(np.int32)
+        self.nnz_raw = np.concatenate(nnz).astype(np.int32)
+        # spread onto the grid; an empty cell has no frame, hence zero pixels
+        if getattr(self, "cell_frame", None) is not None:
+            cf = self.cell_frame
+            self.nnz = np.zeros(self.shape, np.int32)
+            real = cf >= 0
+            self.nnz[real] = self.nnz_raw[cf[real]]
+        else:
+            self.nnz = self.nnz_raw.reshape(self.shape)
         logging.info(
             "imported nnz, average %f" % (self.nnz.mean())
         )  # expensive if you are not logging it.
@@ -1037,11 +1335,19 @@ class DataSet:
     def import_nnz_from_sparse(self):
         """Read the nnz arrays from the sparsefiles"""
         with h5py.File(self.sparsefile, "r") as hin:
-            self.nnz = np.array([hin[scan]["nnz"][:] for scan in self.scans])
+            nnz = [hin[scan]["nnz"][:] for scan in self.scans]
+        self.nnz_raw = np.concatenate(nnz).astype(np.int32)
+        if getattr(self, "cell_frame", None) is not None:
+            cf = self.cell_frame
+            self.nnz = np.zeros(self.shape, np.int32)
+            real = cf >= 0
+            self.nnz[real] = self.nnz_raw[cf[real]]
+        else:
+            self.nnz = np.array([n for n in nnz], np.int32)
         logging.info(
             "imported nnz, average %f" % (self.nnz.mean())
         )  # expensive if you are not logging it.
-        self.frames_per_scan = [len(nnz) for nnz in self.nnz]
+        self.frames_per_scan = [len(n) for n in nnz]
 
     #    def compute_pixel_labels(self):
     # this should instead from from the pk2d file generated by sinograms/properties.py
@@ -1101,7 +1407,7 @@ class DataSet:
             if not os.path.exists(dsfile_folder):
                 os.makedirs(dsfile_folder)
 
-        ZIP = {"compression": "gzip"}
+        ZIP = {"compression": "lzf", "shuffle": True}
 
         with h5py.File(h5name, "a") as hout:
             grp = hout[h5group]
@@ -1180,6 +1486,34 @@ class DataSet:
                     else:
                         data = stringlist
                     setattr(self, name, data)
+        # tolerate files written before the raw/cell-map arrays existed
+        if getattr(self, "cell_frame", None) is None:
+            self.cell_frame = np.arange(
+                self.shape[0] * self.shape[1]).reshape(self.shape)
+        if getattr(self, "omega_raw", None) is None:
+            self.omega_raw = np.asarray(self.omega, float).ravel()
+        if getattr(self, "dty_raw", None) is None:
+            self.dty_raw = np.asarray(self.dty, float).ravel()
+        if getattr(self, "scan_frame_offset", None) is None:
+            self.scan_frame_offset = (
+                np.arange(self.shape[0]) * self.shape[1])
+        if getattr(self, "nnz_raw", None) is None and getattr(
+                self, "nnz", None) is not None:
+            self.nnz_raw = np.asarray(self.nnz).ravel()
+        if getattr(self, "monitor_raw", None) is None and getattr(
+                self, "monitor", None) is not None:
+            self.monitor_raw = np.asarray(self.monitor, float).ravel()
+        if getattr(self, "masked_frames", None) is None:
+            self.masked_frames = np.array([], np.int64)
+        # these fields are not written back out as some are only used in-memory
+        self.cell_to_frame = self.cell_frame.ravel()
+        self.frame_to_cell = np.full(len(self.omega_raw), -1, np.int64)
+        flat = self.cell_frame.ravel()
+        real = flat >= 0
+        self.frame_to_cell[flat[real]] = np.nonzero(real)[0]
+        self._unplaced_in_scan = np.array(
+            np.nonzero(self.frame_to_cell < 0)[0], np.int64)
+        self.unplaced_frames = self._unplaced_in_scan
         self.guessbins()
 
         # analysis paths can only be calculated once

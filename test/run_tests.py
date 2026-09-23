@@ -17,6 +17,7 @@ modules = [
 #not a unittest    "test_overlapimage",
     "test_sparse_image",
     "test_omega_wraps",
+    "test_synthetic_f2scan",
     "test_cImageD11",
     "gv_general.test_gv_general",
     "test_columnfile",

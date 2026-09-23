@@ -158,7 +158,7 @@ def harvest_masterfile(
         with h5py.File(dset.masterfile, "r") as hin:
             done = []
             for scan in dset.scans:
-                if scan.find("::"):
+                if scan.find("::") > -1:
                     scan = scan.split("::")[0]
                 if scan in done:
                     continue
@@ -253,6 +253,13 @@ def harvest_masterfile(
                     pstart = pread
             print(scan, end=", ")
         print()
+        # mirror the grid -> raw frame map so the sparse file can be checked
+        cf = getattr(dset, "cell_frame", None)
+        if cf is not None:
+            dc = hout.require_dataset(
+                "cell_frame", shape=cf.shape, dtype=cf.dtype,
+                compression="lzf", shuffle=True)
+            dc[:] = cf
     return outname
 
 
