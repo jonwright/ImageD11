@@ -510,25 +510,39 @@ class DataSet:
 
         frame_location[frame] = row*ncols + omega_bin(frame): the 1D address of
         that frame on the sinogram. bins_to_frames is its argsort, so
-        bins_to_frames[address] = frame. Placing a frame by its measured omega
-        (not its acquisition index) is what a zig-zag f2scan needs: the same
-        grain diffracts at the same omega in every row, so it lands in the same
-        column whatever direction the scan swept. The grids (omega/dty/nnz) are
-        spread back through bins_to_frames so every column holds one omega.
+        bins_to_frames[address] = frame. The row is the frame's dty bin (ranked,
+        so a noisy dty still gives contiguous rows) and the column its omega bin,
+        so argsort(frame_location) lexsorts the 2-D (dty, omega) grid rather than
+        assuming the scans arrive in order. Placing a frame by its measured omega
+        is what a zig-zag f2scan needs: the same grain diffracts at the same
+        omega in every row, so it lands in the same column whatever direction the
+        scan swept. The grids (omega/dty/nnz) are spread back through
+        bins_to_frames so every column holds one omega.
 
-        Requires exactly one frame per bin (a regular scan). row_of_frame is a
-        per-frame row index, defaulting to the scan order from frames_per_scan.
+        Requires exactly one frame per bin (a regular scan).
         """
         s0, s1 = self.shape
         nframes = len(self.omega_raw)
+        # The sinogram row of a frame comes from its measured dty, not its
+        # position in the acquisition stream. dty is shown as a single value per
+        # turn, but the motor position can be noisy, so we bin it (digitise)
+        # over the grid's row count and then rank the bins that are actually
+        # occupied. That gives contiguous rows ordered by dty, and collapses the
+        # gaps a noisy motor would otherwise leave.
+        self.ymin = float(self.dty_raw.min())
+        self.ymax = float(self.dty_raw.max())
+        self.ystep = (self.ymax - self.ymin) / (s0 - 1) if s0 > 1 else 1.0
+        self.ybincens = np.linspace(self.ymin, self.ymax, s0)
+        self.ybinedges = np.linspace(
+            self.ymin - self.ystep / 2, self.ymax + self.ystep / 2, s0 + 1)
+        dty_bin = np.clip(np.digitize(self.dty_raw, self.ybinedges) - 1, 0, s0 - 1)
+        occ = np.unique(dty_bin)
         if row_of_frame is None:
-            # a regular grid is stored dty-major (one row per dty, s1 columns),
-            # so a frame's row is its position in the linear stream / s1. This
-            # does not depend on frames_per_scan, which a fscan2d master cannot
-            # keep in step when it is split into per-turn rotations.
-            row_of_frame = np.arange(nframes, dtype=np.int64) // s1
+            row_of_frame = np.searchsorted(occ, dty_bin)
         elif len(row_of_frame) != nframes:  # pragma: no cover
             raise ValueError("row_of_frame length does not match raw frames")
+        s0 = int(occ.size)
+        self.shape = (s0, s1)
         # omega bins from the measured omega (no 2-D reshape, so ragged scans
         # of different lengths do not need to all match)
         self.omin = float(self.omega_raw.min())
@@ -562,13 +576,6 @@ class DataSet:
         # nnz is read after guess_shape in import_all, so it may not exist yet
         if self.nnz_raw is not None:
             self.nnz = self.nnz_raw[self.bins_to_frames].reshape(s0, s1)
-        # dty bins
-        self.ymin = float(self.dty_raw.min())
-        self.ymax = float(self.dty_raw.max())
-        self.ybincens = np.linspace(self.ymin, self.ymax, s0)
-        self.ystep = (self.ymax - self.ymin) / (s0 - 1) if s0 > 1 else 1.0
-        self.ybinedges = np.linspace(
-            self.ymin - self.ystep / 2, self.ymax + self.ystep / 2, s0 + 1)
 
     def import_scans(self, scans=None, hname=None):
         """Reads in the scans from the bliss master file"""

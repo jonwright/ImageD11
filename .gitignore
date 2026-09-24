@@ -143,3 +143,5 @@ test/test_fetch_data/
 
 # end_to_end comparison runs (output folder holds h5/log/json outputs)
 test/end_to_end/output/
+# CI labelling log (written by test/end_to_end/test_ci_labeling.py)
+test/end_to_end/ci_labeling.log
