@@ -68,22 +68,21 @@ def guess_omega_step( omega, rptcut=0.02 ):
     # print('mx, avg',dv.max(), dv.mean(), guess)
     return guess
 
-def get_rotations_images(omega, jump=180.0):
-    """Detect rotation boundaries and return the per-rotation frame counts.
+def get_rotations_images(omega):
+    """Per-turn frame counts of a continuous rotation.
 
-    The boundary of a turn is where the omega angle wraps back mod 360. The
-    column may be a mod-360 motor (usual 3DXRD) or an absolute one; it is
-    folded mod-360 here. A large angular jump (> jump, default 180 deg) marks a
-    turn boundary, which catches both a forward scan (angle drops at the wrap)
-    and a reverse scan (angle rises at the wrap), while ignoring the small
-    within-turn steps. A scan that stays within one turn returns a single count.
+    omega: the delivered per-frame centre angles (a mod-360 motor column, e.g.
+    diffrz_cen360). The frame-to-frame step is normalised to [-180,180) and
+    averaged, which is robust to a bad first frame and to the delivered step
+    drifting from the requested one. A turn ends each time the motor has passed
+    a whole number of 360-degree bin edges, so a frame's turn index depends only
+    on (i + 0.5) * omegastep and the first angle cancels out entirely.
     """
     omega = np.asarray(omega, float).ravel()
-    om360 = np.mod(omega, 360.0)
-    jumps = np.abs(np.diff(om360))
-    resets = np.where(jumps > jump)[0] + 1
-    bounds = np.concatenate([[0], resets, [len(omega)]])
-    return np.diff(bounds)
+    steps = (np.diff(omega) + 180.0) % 360.0 - 180.0
+    omegastep = steps.mean()
+    turn = np.floor((np.arange(len(omega)) + 0.5) * omegastep / 360.0).astype(np.int64)
+    return np.bincount(turn - turn.min())
 
 class DataSet:
     """One DataSet instance per detector!"""
@@ -527,28 +526,35 @@ class DataSet:
                         else:
                             rotations += [ scan, ]
                     elif title.split()[0] == "f2scan":
-                        # a continuous rotation split into turns: the turn
-                        # boundaries come from the frame numbers (omega wraps).
-                        step = s["instrument/fscan_parameters/step_size"][()]
-                        s1 = int(np.round(360 / step))
-                        f2scan_s1 = s1
+                        # a continuous rotation split into turns. Turn sizes
+                        # come from the omega column (get_rotations_images) and
+                        # the effective step is the measured mean, so the row
+                        # size follows the geometry rather than the setpoint.
+                        # Each row is R frames, where R is the shortest interior
+                        # turn: an interior row can never be short, so only the
+                        # first/last (possibly partial) turn is dropped, and an
+                        # over-long turn sheds its edge frame(s) to reach R.
                         om = np.asarray(self.omega[i], float)
                         dty_i = np.asarray(self.dty[i], float)
+                        counts = get_rotations_images(om)
+                        if len(counts) >= 3:
+                            # guard: min[1:-1] needs the first/last row to be
+                            # identifiable, so require at least 3 turns.
+                            R = int(min(counts[1:-1]))
+                        else:
+                            R = int(min(counts)) if len(counts) else 1
+                        f2scan_s1 = R
                         start = 0
-                        for count in get_rotations_images(om):
-                            if count >= s1:
-                                # clip an over-long turn to exactly s1 frames;
-                                # keep it as one regular row of the grid.
+                        for count in counts:
+                            if count >= R:
                                 rotations.append(
-                                    "%s::[%d:%d]" % (scan, start, start + s1))
-                                f2_omega_rows.append(om[start:start + s1])
-                                f2_dty_rows.append(dty_i[start:start + s1])
+                                    "%s::[%d:%d]" % (scan, start, start + R))
+                                f2_omega_rows.append(om[start:start + R])
+                                f2_dty_rows.append(dty_i[start:start + R])
                             else:
-                                # a partial turn (shorter than s1) cannot fill a
-                                # row; drop it so the grid stays regular.
                                 logging.info(
-                                    "f2scan: dropping partial %d-frame turn at "
-                                    "frame %d" % (count, start))
+                                    "f2scan: dropping %d-frame turn at frame %d "
+                                    "(shorter than %d)" % (count, start, R))
                             start += count
                     else:
                         s0 = 1

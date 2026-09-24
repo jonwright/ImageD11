@@ -1,13 +1,17 @@
 """Synthetic f2scan cases trimmed to a regular sinogram grid.
 
-The minimal import path (DataSet.guess_shape) detects each turn's boundaries
-from the omega column - a mod-360 motor column (usual 3DXRD) or an absolute
-one, folded mod-360 as needed - and trims every turn to exactly
-round(360/step) frames, dropping any partial turn, so the sinogram grid is
-regular and the existing labelling/pairing code needs no change.
+The minimal import path (DataSet.guess_shape) reads the f2scan omega column,
+averages the per-frame step into omegastep, and places turn cuts on bin edges:
+a frame is in turn floor((i + 0.5) * omegastep / 360). Each row is R frames
+where R is the shortest interior turn; an over-long turn sheds its edge
+frame(s) to reach R and a short trailing turn (first/last) is dropped. A scan
+that doesn't start at omega 0 is handled because the first angle cancels in
+the turn assignment, and a reverse scan works because the normalised step
+carries the sign.
 
-These drive straight-line fits to the three real f2scan files (forward scan),
-a reverse-scan case, and both a mod-360 and an absolute omega column.
+These cover the three real-case shapes (which reproduce s4/AA/Cu exactly),
+forward and reverse scans, a non-zero start, and both the mod-360 motor column
+(diffrz_cen360) and the absolute one (diffrz_trig).
 """
 from __future__ import print_function
 
@@ -23,14 +27,40 @@ import synthetic_f2scan as S
 
 try:
     import ImageD11.sinograms.dataset
+    import ImageD11.sinograms.dataset as IMGD
 except Exception:  # pragma: no cover
-    pass
+    IMGD = None
 
 
 def slice_len(scan):
     """Length of a "1.1::[a:b]" slice, or None if it is a plain scan."""
     m = re.match(r".*\[(\d+):(\d+)\]", scan)
     return None if m is None else int(m.group(2)) - int(m.group(1))
+
+
+class TestGetRotationsImages(unittest.TestCase):
+    """Core: per-turn frame counts from the omega column."""
+
+    def test_forward_nonzero_start(self):
+        # 4 turns of 6, starting at 100.5 (not 0, not a multiple of 60).
+        self.assertEqual(IMGD.get_rotations_images(
+            100.5 + 60.0 * np.arange(24)).tolist(), [6, 6, 6, 6])
+
+    def test_reverse_nonzero_start(self):
+        # reverse scan from 700, 4 turns of 6.
+        self.assertEqual(IMGD.get_rotations_images(
+            700.0 - 60.0 * np.arange(24)).tolist(), [6, 6, 6, 6])
+
+    def test_dividing_step(self):
+        # 30 frames of 60 deg = 1800 deg = 5 full turns of 6.
+        self.assertEqual(IMGD.get_rotations_images(
+            np.arange(30) * 60.0).tolist(), [6] * 5)
+
+    def test_not_dividing_step(self):
+        # 3273 frames at 0.22 deg step (like the real Cu case) gives exactly
+        # two turns of 1636 and 1637 frames respectively.
+        counts = IMGD.get_rotations_images(np.arange(3273) * 0.22)
+        self.assertEqual(set(counts.tolist()), {1636, 1637})
 
 
 class TestTrimToRegular(unittest.TestCase):
@@ -43,10 +73,10 @@ class TestTrimToRegular(unittest.TestCase):
     def _case(self, name, omegamotor="diffrz_cen360"):
         """Build one named REAL-case synthetic master and import it."""
         om0, om1, npoints, dt0, dt1, setpoint = S.REAL[name]
-        omega_abs, omega_col, dty_arr, _ = S.linspace_case(
+        omega_edges, omega_col, dty_arr, _ = S.linspace_case(
             (om0, om1), (dt0, dt1), npoints, setpoint)
         path = os.path.join(self.tmp, "%s_synth.h5" % name)
-        S.make_master(path, npoints, omega_abs, omega_col, dty_arr, setpoint)
+        S.make_master(path, npoints, omega_edges, omega_col, dty_arr, setpoint)
         return S.build_dataset(path, self.tmp, omegamotor=omegamotor)
 
     def _assert_regular(self, ds):
@@ -59,10 +89,9 @@ class TestTrimToRegular(unittest.TestCase):
         self.assertEqual(tuple(ds.dty.shape), tuple(ds.shape))
 
     def test_s4(self):
-        # a clean scan: step divides 360, so every turn is 1440 frames.
+        # step divides 360, so every turn is 1440 frames; nothing to drop.
         ds = self._case("s4")
-        self.assertEqual(ds.shape[1], 1440)
-        self.assertGreater(ds.shape[0], 380)
+        self.assertEqual(ds.shape, (389, 1440))
         self._assert_regular(ds)
 
     def test_AA_drops_partial_last_turn(self):
@@ -72,21 +101,20 @@ class TestTrimToRegular(unittest.TestCase):
         self._assert_regular(ds)
 
     def test_Cu_clips_overlong_turns(self):
-        # step does not divide 360, so some turns run 1637; clip to 1636.
+        # step does not divide 360, so some turns run 1637; drop one each to 1636.
         ds = self._case("Cu")
-        self.assertEqual(ds.shape, (550, 1636))
+        self.assertEqual(ds.shape, (551, 1636))
         self._assert_regular(ds)
 
-    def test_absolute_omega_column_is_folded(self):
-        # diffrz_trig is the absolute motor; the trim mod-360 folds it itself.
+    def test_absolute_omega_column(self):
+        # the absolute motor column (diffrz_trig) gives the same row size.
         ds = self._case("AA", omegamotor="diffrz_trig")
         self.assertEqual(ds.shape, (250, 3600))
         self._assert_regular(ds)
 
     def test_reverse_scan(self):
-        # omega descends (reverse scan): the wrap rises at each turn boundary.
-        ds = S.make_case((720.0, 0.0), (10.0, 10.0), 13, 60.0, self.tmp,
-                         name="rev")
+        # omega descends (reverse scan).
+        ds = S.make_case((720.0, 0.0), (10.0, 10.0), 13, 60.0, self.tmp, name="rev")
         self.assertEqual(ds.shape, (2, 6))
         self._assert_regular(ds)
 

@@ -32,16 +32,24 @@ REAL = {
 
 
 def linspace_case(omega, dty, npoints, setpoint_step, omega_mod360=True):
-    """Build the (omega_abs, omega_col, dty, title) for one case."""
-    omega_abs = np.linspace(omega[0], omega[1], npoints)
-    omega_col = np.mod(omega_abs, 360.0) if omega_mod360 else omega_abs
+    """Build the (omega_edges, omega_centres, dty, title) for one case.
+
+    omega: (start, end) of the frame EDGES (the diffrz_trig motor). A frame is
+    sampled at its centre, half a step later (diffrz_cen360), so
+    cen = trig + setpoint_step/2, matching the bin-edge/bin-centre split used
+    by the real data.
+    """
+    omega_edges = np.linspace(omega[0], omega[1], npoints)
+    half = setpoint_step / 2.0
+    omega_centres = omega_edges + half
+    omega_col = np.mod(omega_centres, 360.0) if omega_mod360 else omega_centres
     dty_arr = np.linspace(dty[0], dty[1], npoints)
     dty_slope = 0.0 if npoints < 2 else (dty[1] - dty[0]) / (npoints - 1)
     title = (
         "f2scan diffrz 0 %.6f diffty %.4f, %.6e %d 0.002 0.00200017"
         % (setpoint_step, dty[0], dty_slope, npoints)
     )
-    return omega_abs, omega_col, dty_arr, title
+    return omega_edges, omega_col, dty_arr, title
 
 
 def make_master(path, npoints, omega_abs, omega_col, dty, setpoint_step):
