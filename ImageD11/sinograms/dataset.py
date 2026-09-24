@@ -1174,17 +1174,18 @@ class DataSet:
         dset.dty is the row median and so ignores it.
 
         Only defined once the frame map exists; frames that do not sit on the
-        grid (f2scan unplaced frames) return NaN.
+        grid (f2scan unplaced frames) are reported as 0, since a missing cell
+        carries no deviation.
         """
         if self.dty_raw is None or self.dty is None or self.frame_location is None:
             return None
         s1 = self.shape[1]
         floc = np.asarray(self.frame_location, np.int64)
-        row = np.full(len(floc), -1, np.int64)
+        row = np.zeros(len(floc), np.int64)
         placed = floc >= 0
         row[placed] = floc[placed] // s1
         row_median = np.asarray(self.dty, float)[:, 0]
-        out = np.full(len(floc), np.nan, float)
+        out = np.zeros(len(floc), float)
         out[placed] = (np.asarray(self.dty_raw, float)[placed]
                        - row_median[row[placed]])
         return out
