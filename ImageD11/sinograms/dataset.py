@@ -726,7 +726,7 @@ class DataSet:
         f2scan is one continuous rotation split into turns of round(360/step)
         frames, but a turn is not exactly that many frames: an over-long turn
         drops the frame that has already crossed into the next turn, and a
-        short turn leaves trailing empty cells. cell_frame records which raw
+        short turn leaves trailing empty cells. bins_to_frames records which raw
         frame occupies each cell, so nothing is lost and no frame is double
         counted. Every other scan type keeps the regular assumption.
         """
