@@ -68,6 +68,23 @@ def guess_omega_step( omega, rptcut=0.02 ):
     # print('mx, avg',dv.max(), dv.mean(), guess)
     return guess
 
+def get_rotations_images(omega, jump=180.0):
+    """Detect rotation boundaries and return the per-rotation frame counts.
+
+    The boundary of a turn is where the omega angle wraps back mod 360. The
+    column may be a mod-360 motor (usual 3DXRD) or an absolute one; it is
+    folded mod-360 here. A large angular jump (> jump, default 180 deg) marks a
+    turn boundary, which catches both a forward scan (angle drops at the wrap)
+    and a reverse scan (angle rises at the wrap), while ignoring the small
+    within-turn steps. A scan that stays within one turn returns a single count.
+    """
+    omega = np.asarray(omega, float).ravel()
+    om360 = np.mod(omega, 360.0)
+    jumps = np.abs(np.diff(om360))
+    resets = np.where(jumps > jump)[0] + 1
+    bounds = np.concatenate([[0], resets, [len(omega)]])
+    return np.diff(bounds)
+
 class DataSet:
     """One DataSet instance per detector!"""
 
@@ -474,6 +491,11 @@ class DataSet:
 
     def guess_shape(self):
         npts = np.sum( self.frames_per_scan )
+        # a f2scan is trimmed to a regular grid of exactly s1 frames per turn;
+        # detected from the omega column by its mod-360 turn boundaries.
+        f2scan_s1 = None
+        f2_omega_rows = []
+        f2_dty_rows = []
         if os.path.exists(self.masterfile):
             # strip [i::j] from self.scans if already there:
             seen = set()
@@ -488,7 +510,9 @@ class DataSet:
             for i, scan in enumerate(scans):
                 with h5py.File(self.masterfile, "r") as hin:
                     s = hin[scan]
-                    title = s["title"].asstr()[()]
+                    title = s["title"][()]
+                    if isinstance(title, bytes):
+                        title = title.decode()
                     # print("Scan title", title)
                     if title.split()[0] == "fscan2d":
                         s0 = s["instrument/fscan_parameters/slow_npoints"][()]
@@ -503,40 +527,51 @@ class DataSet:
                         else:
                             rotations += [ scan, ]
                     elif title.split()[0] == "f2scan":
-                        # good luck ? Assuming rotation was the inner loop here:
+                        # a continuous rotation split into turns: the turn
+                        # boundaries come from the frame numbers (omega wraps).
                         step = s["instrument/fscan_parameters/step_size"][()]
                         s1 = int(np.round(360 / step))
-                        s0 = self.frames_per_scan[i] // s1
-                        # logging.warning("Dataset might need to be reshaped")
-                        if s0 > 1:
-                            file_nums = np.arange( s0 * s1 ).reshape((s0, s1))
-                            if (s1 * s0) != self.frames_per_scan[i]:
-                                logging.warning( 'scan %s problem in guessing f2scan shape s1 = %d s0 = %s nframes = %d'%(
-                                    scan, s1, s0, self.frames_per_scan[i] ) )
-                            rotations += [
-                                "%s::[%d:%d]" % (scan, row[0], row[-1] + 1)
-                                for row in file_nums
-                                ]
-                        else:
-                            rotations += [ scan, ]
+                        f2scan_s1 = s1
+                        om = np.asarray(self.omega[i], float)
+                        dty_i = np.asarray(self.dty[i], float)
+                        start = 0
+                        for count in get_rotations_images(om):
+                            if count >= s1:
+                                # clip an over-long turn to exactly s1 frames;
+                                # keep it as one regular row of the grid.
+                                rotations.append(
+                                    "%s::[%d:%d]" % (scan, start, start + s1))
+                                f2_omega_rows.append(om[start:start + s1])
+                                f2_dty_rows.append(dty_i[start:start + s1])
+                            else:
+                                # a partial turn (shorter than s1) cannot fill a
+                                # row; drop it so the grid stays regular.
+                                logging.info(
+                                    "f2scan: dropping partial %d-frame turn at "
+                                    "frame %d" % (count, start))
+                            start += count
                     else:
                         s0 = 1
                         s1 = npts
                         rotations.append( scan )
             self.scans = rotations
-        if len(self.scans) >= 1:
+        if f2scan_s1 is not None:
+            # a single f2scan master scan, trimmed to a regular grid
+            self.shape = (len(f2_omega_rows), f2scan_s1)
+            self.omega = np.array(f2_omega_rows)
+            self.dty = np.array(f2_dty_rows)
+        elif len(self.scans) >= 1:
             s0 = len(self.scans)
             s1 = npts // s0
-        else:
-            # no scans
-            s0 = 0
-            s1 = 0
-        self.shape = s0, s1
-        if np.prod(self.shape) != npts:
+            self.shape = s0, s1
+            if np.prod(self.shape) != npts:
                 print("Warning: irregular scan - might be bugs in here")
                 print(npts, len(self.scans))
-        self.omega = np.array(self.omega).reshape(self.shape)
-        self.dty = np.array(self.dty).reshape(self.shape)
+            self.omega = np.array(self.omega).reshape(self.shape)
+            self.dty = np.array(self.dty).reshape(self.shape)
+        else:
+            # no scans
+            self.shape = (0, 0)
         logging.info(
                 "sinogram shape = ( %d , %d ) imageshape = ( %d , %d)"
                 % (self.shape[0], self.shape[1], self.imageshape[0], self.imageshape[1])

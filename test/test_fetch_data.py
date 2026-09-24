@@ -1,6 +1,7 @@
 """Unit tests for ImageD11/fetch_data.py"""
 import os
 import shutil
+import tempfile
 import unittest
 
 import six
@@ -85,10 +86,12 @@ class TestGetDataset(unittest.TestCase):
     def setUp(self):
         self.valid_dsetname = 'Si_cube_S3DXRD_nt_moves_dty'
         self.valid_base_url = fetch_data.dataset_base_urls[self.valid_dsetname]
-        self.valid_folder = './test_fetch_data'
-        if os.path.exists(self.valid_folder):
-            raise IOError('Intended download destination already exists! Aborting test...')
-        self.invalid_folder = './djasqowdonqwfioqfioqnwd'  # unlikely to collide?
+        # Each test gets its own throwaway destination, so a "fake" dataset a
+        # test writes or a real download cannot collide with the test_fetch_data
+        # folder that the end-to-end silicon labelling test reads.
+        self.tmpdir = tempfile.mkdtemp(prefix='id11_fetchdata_')
+        self.valid_folder = os.path.join(self.tmpdir, 'test_fetch_data')
+        self.invalid_folder = os.path.join(self.tmpdir, 'djasqowdonqwfioqfioqnwd')
         if os.path.exists(self.invalid_folder):
             raise IOError('Intended not-working path actually exists! Aborting test...')
 
@@ -193,5 +196,4 @@ class TestGetDataset(unittest.TestCase):
         self.assertEqual(len(ds_returned.scans), 41)
 
     def tearDown(self):
-        if os.path.exists(self.valid_folder):
-            shutil.rmtree(self.valid_folder)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)

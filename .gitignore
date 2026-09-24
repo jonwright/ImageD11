@@ -114,3 +114,20 @@ test/c2ImageD11_migration/c2_git/
 /_cImageD11module.c
 /_cImageD11-f2pywrappers.f
 /_cImageD11-f2pywrappers2.f90
+
+# Generated test outputs and fetched / real test data (never committed)
+# Matched at any level: a pattern without a leading slash applies everywhere.
+*.new
+*.fftnew
+testcolfile.hdf
+test.col
+testgeom.flt
+oldpars.par
+eu.patterson_pks
+test_fetch_data/
+test/test_fetch_data/
+test/f2scans/
+test/end_to_end/output/
+test/*.out
+test/*.db
+test/*.flt
