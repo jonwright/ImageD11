@@ -182,29 +182,29 @@ def pairrow(s, row, ds=None, masked=None):
 
 def pairscans(s1, s2, row, ds=None, omegatol=None, connectivity=4,
               masked1=None, masked2=None):
-    """Pair the frames of adjacent grid rows.
+    """Pair the frames of adjacent rows by matching omega on the sinogram.
 
     s1 = SparseScan for row `row`
     s2 = SparseScan for row `row - 1`
     row = index of s1 in the dataset grid
-    ds = the DataSet, giving the grid (cell_frame, shape, omega_wraps) and the
-        ostep used to derive the default omegatol.
+    ds = the DataSet, giving frame_location / bins_to_frames and ostep.
     omegatol = maximum circular omega difference for a legit pair. Defaults to
         half an omega step (ds.ostep/2), which is right for a scan whose step
         does not equal the hardcoded 0.051 (Cu: 0.22).
-    connectivity = grid connectivity used to find the candidate cell in the
-        adjacent row (4 for a regular grid, 8 to reach the diagonal that is the
-        true neighbour on an offset f2scan).
+    connectivity = kept for API compatibility; the frame in the adjacent row is
+        found by its sinogram column (omega bin), so the grid connectivity is
+        not used here.
     masked1 / masked2 = 0-based local frame indices to skip in s1 / s2.
 
-    For each frame of s1, the neighbouring cell(s) in s2 are found by index
-    (DataSet.grid_neighbours); among them the one whose omega is nearest is
-    chosen and paired if it is within omegatol.
+    A grain diffracts at a given omega, so the same grain in the adjacent dty
+    row sits at the same omega bin - the same sinogram column - whatever the
+    sweep direction. frame_location gives each frame's column, and
+    bins_to_frames inverts it, so the neighbour is the frame in the adjacent row
+    at the same column. frames without a cell (unplaced) make no pair.
 
     returns a dict of pairs:
         (row1, frame1, row2, frame2) -> (nedge, array((nedge,3)))
     """
-    s1cols = ds.shape[1] if ds is not None else s1.shape[0]
     if omegatol is None:
         omegatol = (ds.ostep / 2.0) if (ds is not None and getattr(ds, "ostep", 0)) else 0.051
     olap = ImageD11.sparseframe.overlaps_linear(max(s1.nnz.max(), s2.nnz.max()) + 1)
@@ -217,46 +217,75 @@ def pairscans(s1, s2, row, ds=None, omegatol=None, connectivity=4,
     def circdiff(a, b):
         return abs(((a - b + 180.0) % 360.0) - 180.0)
 
-    for i in range(len(s1.nnz)):
-        if s1.nnz[i] == 0 or i in masked1:
-            continue
-        o1 = omega_1[i]
-        # candidate cells in the adjacent (previous) row, found by index
-        best = None
-        if ds is not None:
-            k = row * s1cols + i
-            for ck in ds.grid_neighbours(k, connectivity):
-                cr, cc = divmod(int(ck), s1cols)
-                if cr != (row - 1):
+    if ds is not None and getattr(ds, "frame_location", None) is not None:
+        ncols = ds.shape[1]
+        sfo = ds.scan_frame_offset
+        floc = ds.frame_location
+        b2f = ds.bins_to_frames
+        lo1, _ = scan_bounds(ds, row)
+        lo2, _ = scan_bounds(ds, row - 1)
+        for i in range(len(s1.nnz)):
+            if s1.nnz[i] == 0 or i in masked1:
+                continue
+            a1 = int(floc[lo1 + i])
+            if a1 < 0 or a1 < ncols:
+                continue  # no cell on the grid, or it is the first row
+            a2 = a1 - ncols  # same column in the previous row
+            if a2 < 0:
+                continue
+            g2 = int(b2f[a2])
+            if g2 < 0:
+                continue
+            j = g2 - lo2
+            if not (0 <= j < len(s2.nnz)):
+                continue
+            if s2.nnz[j] == 0 or j in masked2:
+                continue
+            d = circdiff(omega_1[i], omega_2[j])
+            if d > omegatol:
+                continue
+            f0 = s1.getframe(i)
+            f1 = s2.getframe(j)
+            ans = olap(
+                f0.row,
+                f0.col,
+                f0.pixels["labels"],
+                s1.nlabels[i],
+                f1.row,
+                f1.col,
+                f1.pixels["labels"],
+                s2.nlabels[j],
+            )
+            pairs[s1.sinorow, i, s2.sinorow, j] = ans
+    else:
+        # no frame map: nearest omega anywhere in the adjacent row
+        for i in range(len(s1.nnz)):
+            if s1.nnz[i] == 0 or i in masked1:
+                continue
+            o1 = omega_1[i]
+            best = None
+            for j in range(len(s2.nnz)):
+                if s2.nnz[j] == 0 or j in masked2:
                     continue
-                if cc >= len(s2.nnz) or s2.nnz[cc] == 0 or cc in masked2:
-                    continue
-                d = circdiff(omega_2[cc], o1)
-                if best is None or d < best[0]:
-                    best = (d, cc)
-        else:
-            # no dataset: same-column index in the next row, as before
-            if i < len(s2.nnz) and s2.nnz[i] > 0 and i not in masked2:
-                best = (circdiff(omega_2[i], o1), i)
-        if best is None:
-            continue
-        d, j = best
-        if d > omegatol:
-            # this frame has no neighbour
-            continue
-        f0 = s1.getframe(i)
-        f1 = s2.getframe(j)
-        ans = olap(
-            f0.row,
-            f0.col,
-            f0.pixels["labels"],
-            s1.nlabels[i],
-            f1.row,
-            f1.col,
-            f1.pixels["labels"],
-            s2.nlabels[j],
-        )
-        pairs[s1.sinorow, i, s2.sinorow, j] = ans
+                d = circdiff(omega_2[j], o1)
+                if (best is None or d < best[0]) and d <= omegatol:
+                    best = (d, j)
+            if best is None:
+                continue
+            d, j = best
+            f0 = s1.getframe(i)
+            f1 = s2.getframe(j)
+            ans = olap(
+                f0.row,
+                f0.col,
+                f0.pixels["labels"],
+                s1.nlabels[i],
+                f1.row,
+                f1.col,
+                f1.pixels["labels"],
+                s2.nlabels[j],
+            )
+            pairs[s1.sinorow, i, s2.sinorow, j] = ans
     return pairs
 
 
@@ -287,6 +316,11 @@ def props(scan, i, algorithm="lmlabel", wtmax=None, ds=None, connectivity=4,
     s = 0
     s1 = ds.shape[1] if ds is not None else scan.shape[0]
     j0 = i * s1
+    # frame identity for each peak: the 1D sinogram address of the frame, so the
+    # merge can index omega/dty grids by pk_props[4]. Frames the grid drops
+    # (f2scan over-long turns) fall back to a plain grid index.
+    floc = getattr(ds, "frame_location", None)
+    lo, hi = scan_bounds(ds, i) if (ds is not None and getattr(ds, "scans", None)) else (0, None)
     for j in keep:
         if scan.nnz[j] == 0:
             continue
@@ -317,7 +351,14 @@ def props(scan, i, algorithm="lmlabel", wtmax=None, ds=None, connectivity=4,
         r[1, s:e] = signal
         r[2, s:e] = np.bincount(f0.pixels["labels"], weights=f0.row * wt)[1:]
         r[3, s:e] = np.bincount(f0.pixels["labels"], weights=f0.col * wt)[1:]
-        r[4, s:e] = j + j0
+        addr = j + j0
+        if floc is not None:
+            g = lo + j
+            if g < len(floc):
+                a = int(floc[g])
+                if a >= 0:
+                    addr = a
+        r[4, s:e] = addr
         s = e
     # Matrix entries for this scan with itself:
     pairs = pairrow(scan, i, ds=ds, masked=masked)
@@ -871,6 +912,24 @@ def slice_bounds(scan):
     return 0, None
 
 
+def scan_bounds(ds, i):
+    """(lo, hi) raw master-frame range of grid row i.
+
+    A scan named "1.1::[a:b]" carries its own range. Otherwise the range comes
+    from DataSet.scan_frame_offset (sparse scans are named just "1.1"). hi is
+    None for the last row, meaning "to the end of the raw array".
+    """
+    scan = ds.scans[i]
+    if scan.find("::") > -1:
+        return slice_bounds(scan)
+    sfo = getattr(ds, "scan_frame_offset", None)
+    if sfo is not None and len(sfo) == len(ds.scans):
+        lo = int(sfo[i])
+        hi = int(sfo[i + 1]) if (i + 1) < len(sfo) else None
+        return lo, hi
+    return slice_bounds(scan)
+
+
 def row_frame_mask(ds, row):
     """Local (slice-relative) masked frame indices for grid row `row`.
 
@@ -881,7 +940,7 @@ def row_frame_mask(ds, row):
     mf = getattr(ds, "masked_frames", None)
     if mf is None or len(mf) == 0:
         return None
-    lo, hi = slice_bounds(ds.scans[row])
+    lo, hi = scan_bounds(ds, row)
     mf = np.asarray(mf, int)
     if hi is None:
         loc = mf[mf >= lo] - lo
@@ -905,7 +964,7 @@ def pks_table_from_scan(sparsefilename, ds, row, algorithm='lmlabel', wtmax=None
     This is probably not threadsafe
     """
     sps = ImageD11.sparseframe.SparseScan(sparsefilename, ds.scans[row])
-    lo, hi = slice_bounds(ds.scans[row])
+    lo, hi = scan_bounds(ds, row)
     if hi is None:
         sps.motors["omega"] = ds.omega_raw[lo:]
     else:
@@ -985,7 +1044,7 @@ def process(qin, qshm, qout, hname, dsfilename, options):
     # This is the 1D scan within the same row
     for i in range(start, end + 1):
         scan = ImageD11.sparseframe.SparseScan(hname, scans[i])
-        lo, hi = slice_bounds(scans[i])
+        lo, hi = scan_bounds(dset, i)
         if hi is None:
             scan.motors["omega"] = dset.omega_raw[lo:]
         else:

@@ -8,9 +8,9 @@ The three real cases are reproduced exactly by the generator:
                    part of a turn overflows into a 1637th frame that the grid
                    cannot hold (unplaced).
 
-These check the cell map (cell_frame), the raw arrays it is built on, the
-derived inverse maps, the neighbour primitive, the save/load round trip, and
-that pk2d still indexes the grid by frm.
+These check the frame map (frame_location / bins_to_frames), the raw arrays it
+is built on, the derived inverse maps, the neighbour primitive, the save/load
+round trip, and that pk2d still indexes the grid by frm.
 """
 from __future__ import print_function
 
@@ -70,20 +70,20 @@ class TestCellMap(unittest.TestCase):
         self.assertTrue(_case("s4").omega_wraps)
         self.assertTrue(_case("Cu").omega_wraps)
 
-    def test_cell_frame_shape_matches_dataset(self):
+    def test_frame_map_shape_matches_dataset(self):
         ds = _case("Cu")
-        self.assertEqual(ds.cell_frame.shape, ds.shape)
+        self.assertEqual(ds.bins_to_frames.size, np.prod(ds.shape))
 
-    def test_frame_to_cell_roundtrip(self):
+    def test_frame_location_roundtrip(self):
         ds = _case("Cu")
-        cf = ds.cell_frame
+        cf = ds.bins_to_frames.reshape(ds.shape)
         i, j = np.nonzero(cf >= 0)
         flat = i * ds.shape[1] + j
-        self.assertTrue(np.all(ds.frame_to_cell[cf[i, j]] == flat))
+        self.assertTrue(np.all(ds.frame_location[cf[i, j]] == flat))
 
     def test_grids_equal_raw_at_real_cells(self):
         ds = _case("Cu")
-        cf = ds.cell_frame
+        cf = ds.bins_to_frames.reshape(ds.shape)
         real = cf >= 0
         # omega is the frame's own value at each real cell
         self.assertTrue(np.allclose(
@@ -96,26 +96,27 @@ class TestCellMap(unittest.TestCase):
                 self.assertAlmostEqual(
                     ds.dty[r, 0], ds.dty_raw[nz].mean())
                 self.assertTrue(np.allclose(ds.dty[r], ds.dty[r, 0]))
-        self.assertEqual(np.prod(ds.shape), ds.cell_frame.size)
+        self.assertEqual(np.prod(ds.shape), ds.bins_to_frames.size)
 
     def test_unplaced_frames_stay_in_raw(self):
         ds = _case("Cu")
         up = ds.unplaced_frames
         self.assertLess(np.max(up), len(ds.omega_raw))
         # every unplaced frame has no cell
-        self.assertTrue(np.all(ds.frame_to_cell[up] < 0))
+        self.assertTrue(np.all(ds.frame_location[up] < 0))
 
     def test_save_load_roundtrip(self):
         ds = _case("Cu")
         path = self.tmp + "/ds.h5"
         ds.save(path)
         loaded = ImageD11.sinograms.dataset.load(path)
-        self.assertTrue(np.array_equal(loaded.cell_frame, ds.cell_frame))
+        self.assertTrue(np.array_equal(loaded.bins_to_frames, ds.bins_to_frames))
         self.assertTrue(np.array_equal(
             loaded.unplaced_frames, ds.unplaced_frames))
         self.assertEqual(loaded.shape, ds.shape)
-        self.assertTrue(np.allclose(loaded.omega[loaded.cell_frame >= 0],
-                                    ds.omega[ds.cell_frame >= 0]))
+        ocf = ds.bins_to_frames.reshape(ds.shape)
+        lcf = loaded.bins_to_frames.reshape(loaded.shape)
+        self.assertTrue(np.allclose(loaded.omega[lcf >= 0], ds.omega[ocf >= 0]))
 
 
 class TestGridNeighbours(unittest.TestCase):
@@ -148,12 +149,12 @@ class TestGridNeighbours(unittest.TestCase):
         self.assertIn(2 * s1 + 0, got)  # +omega wraps to column 0
 
     def test_empty_cells_are_not_neighbours(self):
-        empties = np.nonzero(self.ds.cell_frame.ravel() < 0)[0]
+        empties = np.nonzero(self.ds.bins_to_frames < 0)[0]
         self.assertGreaterEqual(len(empties), 1)
         for k in empties[:5]:
             nb = self.ds.grid_neighbours(k, 4)
             self.assertTrue(np.all(
-                self.ds.cell_frame.ravel()[nb] >= 0))
+                self.ds.bins_to_frames[nb] >= 0))
 
 
 class TestPk2dIndexing(unittest.TestCase):
@@ -168,7 +169,7 @@ class TestPk2dIndexing(unittest.TestCase):
 
     def test_pk2d_uses_grid_index(self):
         from ImageD11.sinograms.properties import pks_table
-        cf = self.ds.cell_frame
+        cf = self.ds.bins_to_frames.reshape(self.ds.shape)
         i, j = np.nonzero(cf >= 0)
         flat = (i * self.ds.shape[1] + j)
         # pick three real cells to be our peaks
@@ -186,7 +187,7 @@ class TestPk2dIndexing(unittest.TestCase):
         self.assertTrue(np.allclose(
             out["dty"], self.ds.dty.flat[idx]))
         # and the bliss frame number is one indirection away
-        bliss = self.ds.cell_frame.flat[idx]
+        bliss = self.ds.bins_to_frames.reshape(self.ds.shape).flat[idx]
         self.assertTrue(np.all(bliss >= 0))
 
 
@@ -217,7 +218,10 @@ class TestPropsMask(unittest.TestCase):
         self.SF = SF
         ds = D.DataSet(sample="s", dset="d")
         ds.shape = (2, 4)
-        ds.cell_frame = np.array([[0, 1, 2, 3], [4, 5, 6, 7]]).astype(np.int64)
+        ds.scans = ["1.1"]
+        ds.bins_to_frames = np.arange(8, dtype=np.int64)
+        ds.frame_location = np.arange(8, dtype=np.int64)
+        ds.scan_frame_offset = np.array([0, 4], np.int64)
         ds.omega = np.arange(8.).reshape(2, 4)
         ds.dty = np.zeros((2, 4))
         ds.omega_raw = np.arange(8.0)

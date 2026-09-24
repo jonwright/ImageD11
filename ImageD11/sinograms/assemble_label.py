@@ -254,10 +254,10 @@ def harvest_masterfile(
             print(scan, end=", ")
         print()
         # mirror the grid -> raw frame map so the sparse file can be checked
-        cf = getattr(dset, "cell_frame", None)
+        cf = getattr(dset, "bins_to_frames", None)
         if cf is not None:
             dc = hout.require_dataset(
-                "cell_frame", shape=cf.shape, dtype=cf.dtype,
+                "bins_to_frames", shape=cf.shape, dtype=cf.dtype,
                 compression="lzf", shuffle=True)
             dc[:] = cf
     return outname

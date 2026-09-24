@@ -138,3 +138,8 @@ testgeom.flt
 eu.patterson_pks
 test/eu.patterson_pks
 test/test_fetch_data/
+# fetch_data downloads to ./test_fetch_data relative to the repo root
+/test_fetch_data/
+
+# end_to_end comparison runs (output folder holds h5/log/json outputs)
+test/end_to_end/output/
