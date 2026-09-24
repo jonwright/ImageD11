@@ -127,3 +127,58 @@ def make_case(omega, dty, npoints, setpoint_step, tmpdir, name="case",
     path = os.path.join(tmpdir, "%s_synth.h5" % name)
     make_master(path, npoints, omega_abs, omega_col, dty_arr, setpoint_step)
     return build_dataset(path, tmpdir)
+
+
+def fscan2d_zigzag(n_dty, n_omega, dty_start, dty_step, omega_start, omega_step):
+    """Flattened (omega, dty) arrays for a regular fscan2d scan.
+
+    dty is the slow axis (one value per row, step dty_step), omega the fast axis
+    flying as a zig-zag: each row sweeps the same omega range, alternating
+    direction, so the same grain lands in the same omega column whatever the
+    direction. Returns (omega, dty, shape) with omega/dty dty-major.
+    """
+    omega = np.empty((n_dty, n_omega))
+    for r in range(n_dty):
+        row = omega_start + np.arange(n_omega) * omega_step
+        omega[r] = row if r % 2 == 0 else row[::-1]
+    dty = np.repeat(dty_start + np.arange(n_dty) * dty_step, n_omega)
+    return omega.ravel(), dty, (n_dty, n_omega)
+
+
+def make_fscan2d_master(path, omega, dty, n_dty, n_omega, dty_start, dty_step,
+                        omega_start, omega_step, omegamotor="diffrz_cen360",
+                        dtymotor="diffty"):
+    """A minimal fscan2d master: dty slow axis, omega fast axis (zig-zag)."""
+    with h5py.File(path, "w") as h:
+        g = h.create_group("1.1")
+        g["title"] = ("fscan2d dty %.6f %.6f %d rot %.6f %.6f %d 0.002 0.00200017"
+                      % (dty_start, dty_step, n_dty, omega_start, omega_step,
+                         n_omega))
+        g.create_dataset("measurement/eiger",
+                         data=np.zeros((len(omega), 1, 1), np.int32))
+        g.create_dataset("measurement/%s" % omegamotor, data=omega)
+        g.create_dataset("instrument/positioners/%s" % dtymotor, data=dty)
+        p = g.create_group("instrument/fscan_parameters")
+        p["slow_npoints"] = n_dty
+        p["fast_npoints"] = n_omega
+        p["step_size"] = float(omega_step)
+    return path
+
+
+def make_fscan2d_case(n_dty, n_omega, dty_start, dty_step, omega_start,
+                      omega_step, tmpdir, name="f2d", outlier=None):
+    """Build and import an fscan2d zig-zag dataset.
+
+    outlier = (frame_index, dty_value) to overwrite one frame's dty, exercising
+    the regular-sinogram dty handling (row median ignores it, projection_shifts
+    reports it).
+    """
+    omega, dty, shape = fscan2d_zigzag(n_dty, n_omega, dty_start, dty_step,
+                                       omega_start, omega_step)
+    if outlier is not None:
+        dty = dty.copy()
+        dty[outlier[0]] = outlier[1]
+    path = os.path.join(tmpdir, "%s_synth.h5" % name)
+    make_fscan2d_master(path, omega, dty, n_dty, n_omega, dty_start, dty_step,
+                        omega_start, omega_step)
+    return build_dataset(path, tmpdir)

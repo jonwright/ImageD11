@@ -510,39 +510,53 @@ class DataSet:
 
         frame_location[frame] = row*ncols + omega_bin(frame): the 1D address of
         that frame on the sinogram. bins_to_frames is its argsort, so
-        bins_to_frames[address] = frame. The row is the frame's dty bin (ranked,
-        so a noisy dty still gives contiguous rows) and the column its omega bin,
-        so argsort(frame_location) lexsorts the 2-D (dty, omega) grid rather than
-        assuming the scans arrive in order. Placing a frame by its measured omega
-        is what a zig-zag f2scan needs: the same grain diffracts at the same
-        omega in every row, so it lands in the same column whatever direction the
-        scan swept. The grids (omega/dty/nnz) are spread back through
-        bins_to_frames so every column holds one omega.
+        bins_to_frames[address] = frame. On the regular path the row is the scan
+        (one row per scan, len(scans) == rows, and the scans must already be
+        sorted by dty - which is enforced here), and the column is the frame's
+        omega bin, so argsort(frame_location) lexsorts the (dty, omega) grid
+        rather than assuming frame index = column. Placing a frame by its
+        measured omega is what a zig-zag f2scan needs: the same grain diffracts
+        at the same omega in every row, so it lands in the same column whatever
+        direction the scan swept.
 
-        Requires exactly one frame per bin (a regular scan).
+        dset.dty is the median of dty_raw over each row (== over each scan),
+        applied unconditionally. A single dty outlier therefore does not move a
+        frame's row and is absorbed by the median; it is not lost, because
+        dset.projection_shifts reports dty_raw - dset.dty per frame. Requires
+        exactly one frame per bin and scans sorted by dty.
+
+        TODO: the row median is only the right dty while a row is one scan. An
+        f2scan whose dty drifts across the rotation spans bins and would need the
+        same treatment applied on the f2scan (cell_blocks) path.
         """
         s0, s1 = self.shape
         nframes = len(self.omega_raw)
-        # The sinogram row of a frame comes from its measured dty, not its
-        # position in the acquisition stream. dty is shown as a single value per
-        # turn, but the motor position can be noisy, so we bin it (digitise)
-        # over the grid's row count and then rank the bins that are actually
-        # occupied. That gives contiguous rows ordered by dty, and collapses the
-        # gaps a noisy motor would otherwise leave.
-        self.ymin = float(self.dty_raw.min())
-        self.ymax = float(self.dty_raw.max())
-        self.ystep = (self.ymax - self.ymin) / (s0 - 1) if s0 > 1 else 1.0
-        self.ybincens = np.linspace(self.ymin, self.ymax, s0)
-        self.ybinedges = np.linspace(
-            self.ymin - self.ystep / 2, self.ymax + self.ystep / 2, s0 + 1)
-        dty_bin = np.clip(np.digitize(self.dty_raw, self.ybinedges) - 1, 0, s0 - 1)
-        occ = np.unique(dty_bin)
         if row_of_frame is None:
-            row_of_frame = np.searchsorted(occ, dty_bin)
-        elif len(row_of_frame) != nframes:  # pragma: no cover
-            raise ValueError("row_of_frame length does not match raw frames")
-        s0 = int(occ.size)
-        self.shape = (s0, s1)
+            # a regular grid is stored dty-major (one row per scan, s1 columns),
+            # so a frame's row is its position in the linear stream / s1. This
+            # does not depend on frames_per_scan, which a fscan2d master cannot
+            # keep in step when it is split into per-turn rotations.
+            row = np.arange(nframes, dtype=np.int64) // s1
+        else:
+            row = np.asarray(row_of_frame, np.int64)
+            if len(row) != nframes:  # pragma: no cover
+                raise ValueError("row_of_frame length does not match raw frames")
+        # the row dty is the median of dty_raw over the row (== the scan), so an
+        # outlier cannot pull it around and the grid keeps one dty per row.
+        row_dty = np.full(s0, np.nan)
+        for r in range(s0):
+            sel = row == r
+            if sel.any():
+                row_dty[r] = float(np.median(self.dty_raw[sel]))
+        # rows are scans, so an unsorted dty means the scan/row ordering cannot
+        # be trusted: that is a hard error, not a warning.
+        if s0 > 1:
+            d = np.diff(row_dty)
+            if not (np.all(d > 0) or np.all(d < 0)):
+                raise ValueError(
+                    "scans are not sorted by dty (row dty medians are not "
+                    "monotonic); a regular sinogram needs one scan per row in "
+                    "dty order.")
         # omega bins from the measured omega (no 2-D reshape, so ragged scans
         # of different lengths do not need to all match)
         self.omin = float(self.omega_raw.min())
@@ -560,7 +574,7 @@ class DataSet:
                 self.omin - self.ostep / 2, self.omax + self.ostep / 2, s1 + 1)
         col = np.digitize(self.omega_raw, self.obinedges) - 1
         col = np.clip(col, 0, s1 - 1)
-        self.frame_location = (row_of_frame * s1 + col).astype(np.int64)
+        self.frame_location = (row * s1 + col).astype(np.int64)
         counts = np.bincount(self.frame_location, minlength=s0 * s1)
         bad = int((counts != 1).sum())
         if bad:
@@ -572,10 +586,18 @@ class DataSet:
         # grids spread back through the sorted map (column = omega bin)
         self.omega = self.omega_raw[self.bins_to_frames].reshape(s0, s1)
         self.omega_for_bins = self.omega
-        self.dty = self.dty_raw[self.bins_to_frames].reshape(s0, s1)
+        # dset.dty is the median over each row (scan), constant along the row
+        self.dty = np.repeat(row_dty, s1).reshape(s0, s1)
         # nnz is read after guess_shape in import_all, so it may not exist yet
         if self.nnz_raw is not None:
             self.nnz = self.nnz_raw[self.bins_to_frames].reshape(s0, s1)
+        # dty bins from the measured dty
+        self.ymin = float(self.dty_raw.min())
+        self.ymax = float(self.dty_raw.max())
+        self.ybincens = np.linspace(self.ymin, self.ymax, s0)
+        self.ystep = (self.ymax - self.ymin) / (s0 - 1) if s0 > 1 else 1.0
+        self.ybinedges = np.linspace(
+            self.ymin - self.ystep / 2, self.ymax + self.ystep / 2, s0 + 1)
 
     def import_scans(self, scans=None, hname=None):
         """Reads in the scans from the bliss master file"""
@@ -1140,6 +1162,32 @@ class DataSet:
         idx = rr * s1 + cc
         real = self.bins_to_frames[idx] >= 0
         return np.unique(idx[real])
+
+    @property
+    def projection_shifts(self):
+        """Per-frame difference between the measured dty and its row's median.
+
+        projection_shifts[frame] = dty_raw[frame] - dset.dty[row, 0], i.e. how
+        far the frame's dty sits from the median dty of the row (scan) it was
+        binned into. A frame whose dty is faithful to its scan gives ~0; a dty
+        outlier (one frame far from the rest of its scan) is reported here, since
+        dset.dty is the row median and so ignores it.
+
+        Only defined once the frame map exists; frames that do not sit on the
+        grid (f2scan unplaced frames) return NaN.
+        """
+        if self.dty_raw is None or self.dty is None or self.frame_location is None:
+            return None
+        s1 = self.shape[1]
+        floc = np.asarray(self.frame_location, np.int64)
+        row = np.full(len(floc), -1, np.int64)
+        placed = floc >= 0
+        row[placed] = floc[placed] // s1
+        row_median = np.asarray(self.dty, float)[:, 0]
+        out = np.full(len(floc), np.nan, float)
+        out[placed] = (np.asarray(self.dty_raw, float)[placed]
+                       - row_median[row[placed]])
+        return out
 
     def guess_detector(self):
         """Guess which detector we are using from the masterfile"""

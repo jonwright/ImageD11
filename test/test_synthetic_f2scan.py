@@ -255,5 +255,60 @@ class TestPropsMask(unittest.TestCase):
         self.assertEqual(len(s.row), 6)
 
 
+class TestFscan2dDty(unittest.TestCase):
+    """fscan2d zig-zag with dty data: the row dty is the median over the scan,
+    so a single dty outlier is absorbed by dset.dty and reported by
+    projection_shifts instead of breaking the regular sinogram."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="id11_f2d_dty_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build(self, outlier=None):
+        return S.make_fscan2d_case(
+            5, 50, dty_start=0.0, dty_step=20.0, omega_start=0.0,
+            omega_step=1.0, tmpdir=self.tmp, name="f2d", outlier=outlier)
+
+    def _assert_regular(self, ds):
+        self.assertEqual(ds.shape, (5, 50))
+        self.assertTrue(np.all(ds.bins_to_frames >= 0))  # one frame per bin
+        # dset.dty is constant along a row and equals the row median
+        self.assertTrue(np.allclose(
+            ds.dty, np.repeat(ds.dty[:, 0], 50).reshape(5, 50)))
+
+    def test_clean_fscan2d_zigzag(self):
+        ds = self._build()
+        self._assert_regular(ds)
+        ps = ds.projection_shifts
+        self.assertIsNotNone(ps)
+        self.assertTrue(np.allclose(ps, 0.0))  # dty faithful to each scan
+
+    def test_dty_outlier_is_absorbed_by_median(self):
+        idx = 2 * 50 + 25          # row 2 (dty 40), omega column 25
+        ds = self._build(outlier=(idx, 1000.0))
+        self._assert_regular(ds)   # outlier does not break one-frame-per-bin
+        # row 2's dty is the median of its scan: mostly 40, one 1000 -> 40
+        self.assertAlmostEqual(ds.dty[2, 0], 40.0, places=6)
+        ps = ds.projection_shifts
+        self.assertTrue(np.isfinite(ps[idx]))
+        self.assertGreater(abs(ps[idx]), 900.0)  # 1000 - 40
+        others = np.ones(len(ps), bool)
+        others[idx] = False
+        self.assertTrue(np.allclose(ps[others], 0.0))
+
+    def test_scans_not_sorted_by_dty_is_an_error(self):
+        # row dty medians 0, 40, 20 are not monotonic -> hard exception
+        n_dty, n_omega = 3, 10
+        omega, _, _ = S.fscan2d_zigzag(n_dty, n_omega, 0.0, 20.0, 0.0, 1.0)
+        dty = np.repeat([0.0, 40.0, 20.0], n_omega)
+        path = os.path.join(self.tmp, "unsorted.h5")
+        S.make_fscan2d_master(path, omega, dty, n_dty, n_omega, 0.0, 20.0,
+                              0.0, 1.0)
+        with self.assertRaises(ValueError):
+            S.build_dataset(path, self.tmp)
+
+
 if __name__ == "__main__":
     unittest.main()
