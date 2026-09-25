@@ -121,7 +121,8 @@ class DataSet:
         "sparsefile",
         "icolfile",
         "pbpfile",
-        "y0"
+        "y0",
+        "f2scan_dy_domega"
     )
     STRINGLISTS = ("scans", "imagefiles", "sparsefiles")
     # sinograms
@@ -136,7 +137,8 @@ class DataSet:
         "monitor",
         "ybinedges", "ybincens",
         "obinedges", "obincens",
-        "ybin_real_mask"
+        "ybin_real_mask",
+        "dty_raw"
     )
 
     def __init__(
@@ -185,9 +187,11 @@ class DataSet:
         self.shape = (0, 0)
         self.omega = None
         self.dty = None
+        self.dty_raw = None
         self.monitor = None
         self.monitorname = None
         self.monitor_ref = None
+        self.f2scan_dy_domega = 0
         self.ybinedges = None
         self.ybincens = None
         self.obinedges = None
@@ -544,6 +548,13 @@ class DataSet:
                         else:
                             R = int(min(counts)) if len(counts) else 1
                         f2scan_s1 = R
+                        # dty drifts ~one ystep per turn (a diagonal across the
+                        # sinogram). Record the sign; guessbins straightens it,
+                        # keeping the read-in dty in dty_raw.
+                        dty_step = (
+                            float(np.mean(np.diff(dty_i))) if len(dty_i) > 1 else 0.0
+                        )
+                        self.f2scan_dy_domega = int(np.sign(dty_step))
                         start = 0
                         for count in counts:
                             if count >= R:
@@ -566,6 +577,7 @@ class DataSet:
             self.shape = (len(f2_omega_rows), f2scan_s1)
             self.omega = np.array(f2_omega_rows)
             self.dty = np.array(f2_dty_rows)
+            self.dty_raw = self.dty.copy()
         elif len(self.scans) >= 1:
             s0 = len(self.scans)
             s1 = npts // s0
@@ -627,18 +639,26 @@ class DataSet:
             self.obinedges = np.linspace(
                self.omin - self.ostep / 2, self.omax + self.ostep / 2, nomega + 1
             )
-        # values 0, 1, 2
-        # shape = 3
-        # step = 1
         if self.ybincens is not None:
             self.ymin = self.ybincens[0]
             self.ymax = self.ybincens[-1]
         else:
-            self.ymin = self.dty.min()
-            self.ymax = self.dty.max()
+            # dty range from the first/last row means (robust to the f2scan
+            # diagonal); ystep is the positive per-turn magnitude.
+            yfirst = float(self.dty[0].mean())
+            ylast = float(self.dty[-1].mean())
+            self.ymin = min(yfirst, ylast)
+            self.ymax = max(yfirst, ylast)
             self.ybincens = np.linspace(self.ymin, self.ymax, ny)
         if ny > 1:
             self.ystep = (self.ymax - self.ymin) / (ny - 1)
+            # straighten the f2scan diagonal from the raw dty. Recomputed from
+            # dty_raw each time, so a reloaded dataset is never double-corrected.
+            if self.f2scan_dy_domega and self.dty_raw is not None:
+                self.dty = self.dty_raw + np.linspace(
+                    self.f2scan_dy_domega * self.ystep / 2,
+                    -self.f2scan_dy_domega * self.ystep / 2,
+                    nomega)[np.newaxis, :]
         else:
             self.ystep = 1
         if self.ybinedges is None:
