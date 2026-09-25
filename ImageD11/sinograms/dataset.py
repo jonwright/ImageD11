@@ -68,6 +68,22 @@ def guess_omega_step( omega, rptcut=0.02 ):
     # print('mx, avg',dv.max(), dv.mean(), guess)
     return guess
 
+def get_rotations_images(omega):
+    """Per-turn frame counts of a continuous rotation.
+
+    omega: the delivered per-frame centre angles (a mod-360 motor column, e.g.
+    diffrz_cen360). The frame-to-frame step is normalised to [-180,180) and
+    averaged, which is robust to a bad first frame and to the delivered step
+    drifting from the requested one. A turn ends each time the motor has passed
+    a whole number of 360-degree bin edges, so a frame's turn index depends only
+    on (i + 0.5) * omegastep and the first angle cancels out entirely.
+    """
+    omega = np.asarray(omega, float).ravel()
+    steps = (np.diff(omega) + 180.0) % 360.0 - 180.0
+    omegastep = steps.mean()
+    turn = np.floor((np.arange(len(omega)) + 0.5) * omegastep / 360.0).astype(np.int64)
+    return np.bincount(turn - turn.min())
+
 class DataSet:
     """One DataSet instance per detector!"""
 
@@ -105,7 +121,8 @@ class DataSet:
         "sparsefile",
         "icolfile",
         "pbpfile",
-        "y0"
+        "y0",
+        "f2scan_dy_domega"
     )
     STRINGLISTS = ("scans", "imagefiles", "sparsefiles")
     # sinograms
@@ -120,7 +137,8 @@ class DataSet:
         "monitor",
         "ybinedges", "ybincens",
         "obinedges", "obincens",
-        "ybin_real_mask"
+        "ybin_real_mask",
+        "dty_raw"
     )
 
     def __init__(
@@ -169,9 +187,11 @@ class DataSet:
         self.shape = (0, 0)
         self.omega = None
         self.dty = None
+        self.dty_raw = None
         self.monitor = None
         self.monitorname = None
         self.monitor_ref = None
+        self.f2scan_dy_domega = 0
         self.ybinedges = None
         self.ybincens = None
         self.obinedges = None
@@ -474,6 +494,11 @@ class DataSet:
 
     def guess_shape(self):
         npts = np.sum( self.frames_per_scan )
+        # a f2scan is trimmed to a regular grid of exactly s1 frames per turn;
+        # detected from the omega column by its mod-360 turn boundaries.
+        f2scan_s1 = None
+        f2_omega_rows = []
+        f2_dty_rows = []
         if os.path.exists(self.masterfile):
             # strip [i::j] from self.scans if already there:
             seen = set()
@@ -488,7 +513,9 @@ class DataSet:
             for i, scan in enumerate(scans):
                 with h5py.File(self.masterfile, "r") as hin:
                     s = hin[scan]
-                    title = s["title"].asstr()[()]
+                    title = s["title"][()]
+                    if isinstance(title, bytes):
+                        title = title.decode()
                     # print("Scan title", title)
                     if title.split()[0] == "fscan2d":
                         s0 = s["instrument/fscan_parameters/slow_npoints"][()]
@@ -503,40 +530,66 @@ class DataSet:
                         else:
                             rotations += [ scan, ]
                     elif title.split()[0] == "f2scan":
-                        # good luck ? Assuming rotation was the inner loop here:
-                        step = s["instrument/fscan_parameters/step_size"][()]
-                        s1 = int(np.round(360 / step))
-                        s0 = self.frames_per_scan[i] // s1
-                        # logging.warning("Dataset might need to be reshaped")
-                        if s0 > 1:
-                            file_nums = np.arange( s0 * s1 ).reshape((s0, s1))
-                            if (s1 * s0) != self.frames_per_scan[i]:
-                                logging.warning( 'scan %s problem in guessing f2scan shape s1 = %d s0 = %s nframes = %d'%(
-                                    scan, s1, s0, self.frames_per_scan[i] ) )
-                            rotations += [
-                                "%s::[%d:%d]" % (scan, row[0], row[-1] + 1)
-                                for row in file_nums
-                                ]
+                        # a continuous rotation split into turns. Turn sizes
+                        # come from the omega column (get_rotations_images) and
+                        # the effective step is the measured mean, so the row
+                        # size follows the geometry rather than the setpoint.
+                        # Each row is R frames, where R is the shortest interior
+                        # turn: an interior row can never be short, so only the
+                        # first/last (possibly partial) turn is dropped, and an
+                        # over-long turn sheds its edge frame(s) to reach R.
+                        om = np.asarray(self.omega[i], float)
+                        dty_i = np.asarray(self.dty[i], float)
+                        counts = get_rotations_images(om)
+                        if len(counts) >= 3:
+                            # guard: min[1:-1] needs the first/last row to be
+                            # identifiable, so require at least 3 turns.
+                            R = int(min(counts[1:-1]))
                         else:
-                            rotations += [ scan, ]
+                            R = int(min(counts)) if len(counts) else 1
+                        f2scan_s1 = R
+                        # dty drifts ~one ystep per turn (a diagonal across the
+                        # sinogram). Record the sign; guessbins straightens it,
+                        # keeping the read-in dty in dty_raw.
+                        dty_step = (
+                            float(np.mean(np.diff(dty_i))) if len(dty_i) > 1 else 0.0
+                        )
+                        self.f2scan_dy_domega = int(np.sign(dty_step))
+                        start = 0
+                        for count in counts:
+                            if count >= R:
+                                rotations.append(
+                                    "%s::[%d:%d]" % (scan, start, start + R))
+                                f2_omega_rows.append(om[start:start + R])
+                                f2_dty_rows.append(dty_i[start:start + R])
+                            else:
+                                logging.info(
+                                    "f2scan: dropping %d-frame turn at frame %d "
+                                    "(shorter than %d)" % (count, start, R))
+                            start += count
                     else:
                         s0 = 1
                         s1 = npts
                         rotations.append( scan )
             self.scans = rotations
-        if len(self.scans) >= 1:
+        if f2scan_s1 is not None:
+            # a single f2scan master scan, trimmed to a regular grid
+            self.shape = (len(f2_omega_rows), f2scan_s1)
+            self.omega = np.array(f2_omega_rows)
+            self.dty = np.array(f2_dty_rows)
+            self.dty_raw = self.dty.copy()
+        elif len(self.scans) >= 1:
             s0 = len(self.scans)
             s1 = npts // s0
-        else:
-            # no scans
-            s0 = 0
-            s1 = 0
-        self.shape = s0, s1
-        if np.prod(self.shape) != npts:
+            self.shape = s0, s1
+            if np.prod(self.shape) != npts:
                 print("Warning: irregular scan - might be bugs in here")
                 print(npts, len(self.scans))
-        self.omega = np.array(self.omega).reshape(self.shape)
-        self.dty = np.array(self.dty).reshape(self.shape)
+            self.omega = np.array(self.omega).reshape(self.shape)
+            self.dty = np.array(self.dty).reshape(self.shape)
+        else:
+            # no scans
+            self.shape = (0, 0)
         logging.info(
                 "sinogram shape = ( %d , %d ) imageshape = ( %d , %d)"
                 % (self.shape[0], self.shape[1], self.imageshape[0], self.imageshape[1])
@@ -586,18 +639,26 @@ class DataSet:
             self.obinedges = np.linspace(
                self.omin - self.ostep / 2, self.omax + self.ostep / 2, nomega + 1
             )
-        # values 0, 1, 2
-        # shape = 3
-        # step = 1
         if self.ybincens is not None:
             self.ymin = self.ybincens[0]
             self.ymax = self.ybincens[-1]
         else:
-            self.ymin = self.dty.min()
-            self.ymax = self.dty.max()
+            # dty range from the first/last row means (robust to the f2scan
+            # diagonal); ystep is the positive per-turn magnitude.
+            yfirst = float(self.dty[0].mean())
+            ylast = float(self.dty[-1].mean())
+            self.ymin = min(yfirst, ylast)
+            self.ymax = max(yfirst, ylast)
             self.ybincens = np.linspace(self.ymin, self.ymax, ny)
         if ny > 1:
             self.ystep = (self.ymax - self.ymin) / (ny - 1)
+            # straighten the f2scan diagonal from the raw dty. Recomputed from
+            # dty_raw each time, so a reloaded dataset is never double-corrected.
+            if self.f2scan_dy_domega and self.dty_raw is not None:
+                self.dty = self.dty_raw + np.linspace(
+                    self.f2scan_dy_domega * self.ystep / 2,
+                    -self.f2scan_dy_domega * self.ystep / 2,
+                    nomega)[np.newaxis, :]
         else:
             self.ystep = 1
         if self.ybinedges is None:

@@ -33,6 +33,8 @@ modules = [
     "eps_sig.test_eps",
     "test_finite_strain",
 #    "test_stress",
+    "test_synthetic_f2scan",
+    "test_f2scan_real",
     "test_fetch_data"
 ]
 
